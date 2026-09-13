@@ -1,10 +1,12 @@
-import { getAll, put, newId } from '../db.js';
+import { getAll, put, remove, newId } from '../db.js';
 import { extractPdfText, PdfPasswordError, PdfNoTextError } from '../pdf-text.js';
 import { detectParser } from '../parsers/registry.js';
 import { matchCategoryForDescription, learnFromAssignment } from '../merchant-rules.js';
 import { detectTransfers } from '../transfers.js';
+import { matchAgainstManualEntries } from '../reconciliation.js';
+import { formatCurrency } from '../format.js';
 
-let state = null; // { rows, meta, parser, categories }
+let state = null; // { rows, meta, parser, categories, existingAccount, unmatchedManual }
 
 export async function render(container) {
   state = null;
@@ -57,7 +59,7 @@ async function parseFile(container, categories) {
 
     const parser = detectParser(text);
     if (!parser) {
-      showStatus(status, "Couldn't recognize this statement's format. Only HDFC Bank savings and HDFC credit card statements are supported so far.", true);
+      showStatus(status, "Couldn't recognize this statement's format. Only HDFC Bank (savings + credit card) and ICICI Amazon Pay credit card statements are supported so far.", true);
       return;
     }
 
@@ -71,7 +73,23 @@ async function parseFile(container, categories) {
       row.categoryId = await matchCategoryForDescription(row.description);
     }
 
-    state = { rows, meta, parser, categories };
+    const accounts = await getAll('accounts');
+    const existingAccount = accounts.find((a) => a.type === parser.accountType && a.issuer === parser.issuerLabel && a.last4 === meta.accountLast4);
+
+    let unmatchedManual = [];
+    if (existingAccount) {
+      const allTxns = await getAll('transactions');
+      const dates = rows.map((r) => r.date).sort();
+      const rangeStart = meta.periodStart || dates[0];
+      const rangeEnd = meta.periodEnd || dates[dates.length - 1];
+      const manualInRange = allTxns.filter(
+        (t) => t.accountId === existingAccount.id && t.source === 'manual' && t.date >= rangeStart && t.date <= rangeEnd
+      );
+      const result = matchAgainstManualEntries(rows, manualInRange);
+      unmatchedManual = result.unmatchedManual;
+    }
+
+    state = { rows, meta, parser, categories, existingAccount, unmatchedManual };
     showStatus(status, `Parsed ${rows.length} rows.`, false);
     renderResults(resultsEl);
   } catch (err) {
@@ -86,14 +104,17 @@ async function parseFile(container, categories) {
 }
 
 function renderResults(resultsEl) {
-  const { rows, meta, parser } = state;
+  const { rows, meta, parser, unmatchedManual } = state;
+  const matchedCount = rows.filter((r) => r._matchedManualId).length;
 
   resultsEl.innerHTML = `
     <div class="totals-card">
       <div class="totals-row"><span>${parser.issuerLabel} - ${parser.accountType}${meta.accountLast4 ? ` ••${meta.accountLast4}` : ''}</span></div>
       ${renderReconciliation(meta)}
+      ${matchedCount ? `<div class="totals-row"><span class="in">${matchedCount} row${matchedCount === 1 ? '' : 's'} match entries you already logged ✓</span></div>` : ''}
       <div class="totals-row"><span>Parsed rows</span><span id="import-row-count"></span></div>
     </div>
+    ${renderUnmatchedManual(unmatchedManual)}
     <div id="import-row-list" class="import-row-list"></div>
     <button type="button" id="import-commit-btn" class="btn-primary">Commit ${rows.length} rows</button>
     <p id="import-commit-status" class="status" hidden></p>
@@ -107,15 +128,32 @@ function renderResults(resultsEl) {
   updateTotals(resultsEl);
 }
 
+function renderUnmatchedManual(unmatchedManual) {
+  if (!unmatchedManual || unmatchedManual.length === 0) return '';
+  return `
+    <div class="totals-card warn-card">
+      <div class="totals-row"><span>⚠ ${unmatchedManual.length} manual entr${unmatchedManual.length === 1 ? 'y' : 'ies'} from this period didn't show up in the statement</span></div>
+      <ul class="breakdown-list">
+        ${unmatchedManual
+          .map(
+            (m) => `<li class="breakdown-row"><span>${escapeHtml(m.rawDescription)} (${m.date})</span><span class="${m.direction === 'credit' ? 'in' : 'out'}">${m.direction === 'credit' ? '+' : '-'}${formatCurrency(m.amount)}</span></li>`
+          )
+          .join('')}
+      </ul>
+      <p class="muted-note">These stay as-is - double check they're correct, or that the charge didn't get cancelled.</p>
+    </div>
+  `;
+}
+
 function renderReconciliation(meta) {
   if (meta.reconciled === true) {
     return `<div class="totals-row"><span class="in">Reconciles with the statement's own balance ✓</span></div>`;
   }
   if (meta.reconciled === false && meta.statedClosingBalance != null) {
-    return `<div class="totals-row"><span class="out">⚠ Computed closing ${fmtRupees(meta.computedClosingBalance)} vs statement's ${fmtRupees(meta.statedClosingBalance)} - some rows may be off</span></div>`;
+    return `<div class="totals-row"><span class="out">⚠ Computed closing ₹${meta.computedClosingBalance.toFixed(2)} vs statement's ₹${meta.statedClosingBalance.toFixed(2)} - some rows may be off</span></div>`;
   }
   if (meta.reconciled === false && meta.statementPurchasesTotal != null) {
-    return `<div class="totals-row"><span class="out">⚠ Parsed debit total ${fmt(meta.parsedDebitTotal)} vs statement's purchase total ${fmt(meta.statementPurchasesTotal)}</span></div>`;
+    return `<div class="totals-row"><span class="out">⚠ Parsed debit total ${formatCurrency(meta.parsedDebitTotal)} vs statement's purchase total ${formatCurrency(meta.statementPurchasesTotal)}</span></div>`;
   }
   if (meta.reconciled === true && meta.statementPurchasesTotal != null) {
     return `<div class="totals-row"><span class="in">Matches statement's purchase total ✓</span></div>`;
@@ -125,7 +163,8 @@ function renderReconciliation(meta) {
 
 function rowTemplate(row, idx, categories) {
   return `
-    <div class="import-row" data-idx="${idx}">
+    <div class="import-row ${row._matchedManualId ? 'import-row-matched' : ''}" data-idx="${idx}">
+      ${row._matchedManualId ? '<div class="import-row-badge">Already logged</div>' : ''}
       <div class="import-row-top">
         <input type="date" class="ir-field ir-date" data-field="date" value="${row.date}">
         <input type="text" class="ir-field ir-desc" data-field="description" value="${escapeAttr(row.description)}">
@@ -200,9 +239,8 @@ async function commit(resultsEl) {
     return;
   }
 
-  const { meta, parser } = state;
-  const accounts = await getAll('accounts');
-  let account = accounts.find((a) => a.type === parser.accountType && a.issuer === parser.issuerLabel && a.last4 === meta.accountLast4);
+  const { meta, parser, unmatchedManual } = state;
+  let account = state.existingAccount;
   if (!account) {
     account = {
       id: newId(),
@@ -210,22 +248,39 @@ async function commit(resultsEl) {
       type: parser.accountType,
       issuer: parser.issuerLabel,
       last4: meta.accountLast4 || null,
+      billingCycleDay: null,
     };
-    await put('accounts', account);
   }
 
   const dates = rows.map((r) => r.date).sort();
+  const periodEnd = meta.periodEnd || dates[dates.length - 1];
+  const periodStart = meta.periodStart || dates[0];
+
+  if (account.type === 'card' && !account.billingCycleDay) {
+    account.billingCycleDay = new Date(periodEnd).getDate();
+  }
+  if (account.type === 'bank' && meta.statedClosingBalance != null) {
+    account.knownBalance = Math.round(meta.statedClosingBalance * 100);
+    account.knownBalanceDate = periodEnd;
+  }
+  await put('accounts', account);
+
   const importBatch = {
     id: newId(),
     accountId: account.id,
-    periodStart: meta.periodStart || dates[0],
-    periodEnd: meta.periodEnd || dates[dates.length - 1],
+    periodStart,
+    periodEnd,
     importedAt: new Date().toISOString(),
     txCount: rows.length,
   };
   await put('importBatches', importBatch);
 
+  let matchedCount = 0;
   for (const row of rows) {
+    if (row._matchedManualId) {
+      await remove('transactions', row._matchedManualId);
+      matchedCount++;
+    }
     await put('transactions', {
       id: newId(),
       accountId: account.id,
@@ -246,17 +301,13 @@ async function commit(resultsEl) {
 
   const transferCount = await detectTransfers();
 
-  showStatus(statusEl, `Committed ${rows.length} transactions${transferCount ? `, flagged ${transferCount} as transfers` : ''}. Go to Review to categorize the rest.`, false);
+  const parts = [`Committed ${rows.length} transactions`];
+  if (matchedCount) parts.push(`matched ${matchedCount} you'd already logged`);
+  if (transferCount) parts.push(`flagged ${transferCount} as transfers`);
+  if (unmatchedManual && unmatchedManual.length) parts.push(`${unmatchedManual.length} of your manual entries weren't found in the statement - check them above`);
+  showStatus(statusEl, `${parts.join('. ')}. Go to Review to categorize the rest.`, false);
   resultsEl.querySelector('#import-commit-btn').disabled = true;
   state = null;
-}
-
-function fmt(minorUnits) {
-  return `₹${(minorUnits / 100).toFixed(2)}`;
-}
-
-function fmtRupees(value) {
-  return `₹${value.toFixed(2)}`;
 }
 
 function showStatus(el, message, isError) {

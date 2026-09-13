@@ -42,13 +42,13 @@ async function seedIfNeeded() {
   }
 }
 
-async function showView(name) {
+async function showView(name, params = {}) {
   const view = views[name];
   document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   document.getElementById('view-title').textContent = view.title;
   const container = document.getElementById('view-container');
   container.innerHTML = '';
-  await view.module.render(container);
+  await view.module.render(container, params);
   history.replaceState(null, '', `#${name}`);
 }
 
@@ -60,7 +60,10 @@ async function init() {
     btn.addEventListener('click', () => showView(btn.dataset.view));
   });
 
-  document.addEventListener('navigate', (e) => showView(e.detail.view));
+  document.addEventListener('navigate', (e) => {
+    const { view, ...params } = e.detail;
+    showView(view, params);
+  });
 
   const startView = (location.hash || '#summary').slice(1);
   showView(views[startView] ? startView : 'summary');

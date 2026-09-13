@@ -1,5 +1,5 @@
 import { getAll } from '../db.js';
-import { CURRENCY_SYMBOL } from '../config.js';
+import { formatCurrency, formatSignedCurrency } from '../format.js';
 
 let currentRange = 'this-month';
 
@@ -88,9 +88,9 @@ async function renderContent(container) {
 
   content.innerHTML = `
     <div class="totals-card">
-      <div class="totals-row"><span>Total In</span><span class="in">+${fmt(totalIn)}</span></div>
-      <div class="totals-row"><span>Total Out</span><span class="out">-${fmt(totalOut)}</span></div>
-      <div class="totals-row net"><span>Net</span><span>${fmtSigned(totalIn - totalOut)}</span></div>
+      <div class="totals-row"><span>Total In</span><span class="in">+${formatCurrency(totalIn)}</span></div>
+      <div class="totals-row"><span>Total Out</span><span class="out">-${formatCurrency(totalOut)}</span></div>
+      <div class="totals-row net"><span>Net</span><span>${formatSignedCurrency(totalIn - totalOut)}</span></div>
     </div>
     <h3>By Category</h3>
     <ul class="breakdown-list">${renderBreakdown(byCategory, catName)}</ul>
@@ -114,22 +114,13 @@ function renderBreakdown(map, nameFn) {
       <li class="breakdown-row">
         <span>${escapeHtml(nameFn(id))}</span>
         <span class="amounts">
-          ${v.out ? `<span class="out">-${fmt(v.out)}</span>` : ''}
-          ${v.in ? `<span class="in">+${fmt(v.in)}</span>` : ''}
+          ${v.out ? `<span class="out">-${formatCurrency(v.out)}</span>` : ''}
+          ${v.in ? `<span class="in">+${formatCurrency(v.in)}</span>` : ''}
         </span>
       </li>`
     )
     .join('');
   return rows || '<li class="empty">No transactions.</li>';
-}
-
-function fmt(minorUnits) {
-  return `${CURRENCY_SYMBOL}${(minorUnits / 100).toFixed(2)}`;
-}
-
-function fmtSigned(minorUnits) {
-  const sign = minorUnits < 0 ? '-' : '';
-  return `${sign}${CURRENCY_SYMBOL}${(Math.abs(minorUnits) / 100).toFixed(2)}`;
 }
 
 function escapeHtml(str) {

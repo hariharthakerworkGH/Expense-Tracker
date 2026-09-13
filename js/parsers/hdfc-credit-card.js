@@ -1,7 +1,9 @@
 // HDFC Bank credit card statement (works across HDFC's co-branded cards -
 // the layout is the bank's own template, not specific to one card product).
 //
-// Each transaction is one line: "DD/MM/YYYY| HH:MM <description> [+] C<amount> l"
+// Each transaction starts as "DD/MM/YYYY| HH:MM <description> [+] C<amount> l"
+// but a long description can wrap onto extra lines with no date, so the
+// description is accumulated until a line completes the C<amount> tail.
 // The statement's PDF uses a custom font for the rupee sign that both pdf.js
 // and every other extractor decode as a literal "C" - so "C 377.00" means
 // Rs. 377.00, not a currency code. A trailing "+" marks credits (cashback,
@@ -10,8 +12,9 @@ export const id = 'hdfc-credit-card';
 export const accountType = 'card';
 export const issuerLabel = 'HDFC Bank';
 
-const TXN_RE = /^(\d{2})\/(\d{2})\/(\d{4})\|\s*(\d{2}:\d{2})\s+(.*?)\s*(\+)?\s*C\s*([\d,]+\.\d{2})\s*l?$/;
-const CARD_NUMBER_RE = /\b(\d{4,6}X{2,8}(\d{4}))\b/;
+const LINE_START_RE = /^(\d{2})\/(\d{2})\/(\d{4})\|\s*(\d{2}:\d{2})\s+(.*)$/;
+const TAIL_RE = /^(.*?)\s*(\+)?\s*C\s*([\d,]+\.\d{2})\s*l?$/;
+const CARD_NUMBER_RE = /\b(\d{4,8}X{2,8}(\d{4}))\b/;
 const PERIOD_RE = /(\d{1,2}\s+\w{3},\s+\d{4})\s*-\s*(\d{1,2}\s+\w{3},\s+\d{4})/;
 const SUMMARY_RE = /C\s?([\d,]+\.\d{2})\s*\+?\s*C\s?([\d,]+\.\d{2})\s*\+?\s*C\s?([\d,]+\.\d{2})\s*\+?\s*C\s?([\d,]+\.\d{2})/;
 
@@ -25,18 +28,52 @@ export function parse(text) {
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
   const rows = [];
 
-  for (const line of lines) {
-    const m = line.match(TXN_RE);
-    if (!m) continue;
-    const [, dd, mm, yyyy, , desc, plus, amountStr] = m;
-    const direction = plus ? 'credit' : 'debit';
-    const amount = Math.round(toNumber(amountStr) * 100);
+  let i = 0;
+  while (i < lines.length) {
+    const m = lines[i].match(LINE_START_RE);
+    if (!m) {
+      i++;
+      continue;
+    }
+    const [, dd, mm, yyyy] = m;
+    let rest = m[5];
+    let j = i + 1;
+    let tail = rest.match(TAIL_RE);
+    while (!tail && j < lines.length && j < i + 4 && !LINE_START_RE.test(lines[j])) {
+      rest = `${rest} ${lines[j]}`;
+      tail = rest.match(TAIL_RE);
+      j++;
+    }
+    if (!tail) {
+      i++;
+      continue;
+    }
+
+    let [, desc, plus, amountStr] = tail;
+
+    // Rare case: a long description wraps so that the date+amount line ends
+    // up sandwiched between the description's two halves (line ordering
+    // gets scrambled when a sidebar/legend element shares a Y position).
+    // If the description came back empty, the missing half is the line
+    // just before this one (never consumed, since it has no date to match)
+    // and/or the line just after (not yet consumed either).
+    if (!desc.trim()) {
+      const before = i > 0 && !LINE_START_RE.test(lines[i - 1]) ? lines[i - 1] : '';
+      let after = '';
+      if (j < lines.length && !LINE_START_RE.test(lines[j])) {
+        after = lines[j];
+        j++;
+      }
+      desc = [before, after].filter(Boolean).join(' ');
+    }
+
     rows.push({
       date: `${yyyy}-${mm}-${dd}`,
-      description: desc.trim(),
-      amount,
-      direction,
+      description: desc.trim().replace(/\s+/g, ' '),
+      amount: Math.round(toNumber(amountStr) * 100),
+      direction: plus ? 'credit' : 'debit',
     });
+    i = j;
   }
 
   const meta = { rowCount: rows.length };

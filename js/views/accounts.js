@@ -1,5 +1,6 @@
-import { getAll, put } from '../db.js';
-import { CURRENCY_SYMBOL } from '../config.js';
+import { getAll, put, newId } from '../db.js';
+import { formatCurrency } from '../format.js';
+import { currentCycleStart } from '../billing-cycle.js';
 
 export async function render(container) {
   const [accounts, transactions, importBatches] = await Promise.all([getAll('accounts'), getAll('transactions'), getAll('importBatches')]);
@@ -8,14 +9,33 @@ export async function render(container) {
   for (const a of accounts) (groups[a.type] || (groups[a.type] = [])).push(a);
 
   container.innerHTML = `
-    <button type="button" id="go-import-btn" class="btn-secondary">+ Import statement</button>
+    <div class="accounts-actions">
+      <button type="button" id="go-import-btn" class="btn-secondary">Import a statement</button>
+      <button type="button" id="add-account-btn" class="btn-secondary">Add an account</button>
+    </div>
     ${renderGroup('Cash', groups.cash, transactions, importBatches)}
-    ${renderGroup('Bank', groups.bank, transactions, importBatches)}
-    ${renderGroup('Credit Cards', groups.card, transactions, importBatches)}
+    ${renderGroup('Bank accounts', groups.bank, transactions, importBatches)}
+    ${renderGroup('Credit cards', groups.card, transactions, importBatches)}
   `;
 
   container.querySelector('#go-import-btn').addEventListener('click', () => {
     container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'import' } }));
+  });
+
+  container.querySelector('#add-account-btn').addEventListener('click', async () => {
+    const label = prompt('Account name (e.g. "HDFC Debit Card" or "Amex Card")');
+    if (!label || !label.trim()) return;
+    const typeInput = (prompt('Type "bank" or "card"', 'card') || '').trim().toLowerCase();
+    const type = typeInput === 'bank' ? 'bank' : 'card';
+    const issuer = (prompt('Bank/issuer name (optional - helps match future statement imports)') || '').trim() || null;
+    const last4 = (prompt('Last 4 digits (optional - helps match future statement imports)') || '').trim() || null;
+    let billingCycleDay = null;
+    if (type === 'card') {
+      const day = parseInt(prompt("What day of the month does this card's statement close? (e.g. 25)") || '', 10);
+      if (day >= 1 && day <= 31) billingCycleDay = day;
+    }
+    await put('accounts', { id: newId(), label: label.trim(), type, issuer, last4, billingCycleDay: billingCycleDay || null });
+    render(container);
   });
 
   container.querySelectorAll('.account-rename').forEach((btn) => {
@@ -27,6 +47,24 @@ export async function render(container) {
         await put('accounts', account);
         render(container);
       }
+    });
+  });
+
+  container.querySelectorAll('.account-cycle-edit').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const account = accounts.find((a) => a.id === btn.dataset.id);
+      const day = parseInt(prompt("What day of the month does this card's statement close? (e.g. 25)", account.billingCycleDay || '') || '', 10);
+      if (day >= 1 && day <= 31) {
+        account.billingCycleDay = day;
+        await put('accounts', account);
+        render(container);
+      }
+    });
+  });
+
+  container.querySelectorAll('.account-add-expense').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'add', accountId: btn.dataset.id } }));
     });
   });
 }
@@ -45,8 +83,7 @@ function accountRow(account, transactions, importBatches) {
   const acctTxns = transactions.filter((t) => t.accountId === account.id);
 
   if (account.type === 'card') {
-    const batches = importBatches.filter((b) => b.accountId === account.id).sort((a, b) => (a.periodEnd < b.periodEnd ? 1 : -1));
-    const cycleStart = batches[0]?.periodEnd || null;
+    const cycleStart = currentCycleStart(account, importBatches);
     const cycleSpend = acctTxns
       .filter((t) => t.direction === 'debit' && !t.isTransfer && (!cycleStart || t.date > cycleStart))
       .reduce((s, t) => s + t.amount, 0);
@@ -55,10 +92,33 @@ function accountRow(account, transactions, importBatches) {
       <li class="cat-row">
         <div class="cat-row-main">
           <span class="cat-name">${escapeHtml(account.label)}</span>
+          <span class="cat-actions">
+            <button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button>
+          </span>
+        </div>
+        <div class="account-projection">
+          Current cycle spend<span class="muted">${cycleStart ? ` since ${cycleStart}` : ''}</span>: <strong class="out">${formatCurrency(cycleSpend)}</strong>
+        </div>
+        <div class="account-subrow">
+          <button type="button" class="icon-btn account-cycle-edit" data-id="${account.id}">
+            ${account.billingCycleDay ? `Bill closes day ${account.billingCycleDay}` : 'Set billing cycle day'}
+          </button>
+          <button type="button" class="btn-tiny account-add-expense" data-id="${account.id}">+ Log a spend</button>
+        </div>
+      </li>
+    `;
+  }
+
+  if (account.type === 'bank') {
+    const balance = bankBalance(account, acctTxns);
+    return `
+      <li class="cat-row">
+        <div class="cat-row-main">
+          <span class="cat-name">${escapeHtml(account.label)}</span>
           <span class="cat-actions"><button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button></span>
         </div>
         <div class="account-projection">
-          Projected next bill${cycleStart ? ` (since ${cycleStart})` : ''}: <strong class="out">${fmt(cycleSpend)}</strong>
+          ${balance != null ? `Balance: <strong>${formatCurrency(balance)}</strong>` : 'Balance unknown - import a statement to see it'}
         </div>
       </li>
     `;
@@ -74,15 +134,26 @@ function accountRow(account, transactions, importBatches) {
     <li class="cat-row">
       <div class="cat-row-main">
         <span class="cat-name">${escapeHtml(account.label)}</span>
-        <span class="cat-actions"><button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button></span>
+        <span class="cat-actions">
+          <button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button>
+        </span>
       </div>
-      <div class="account-projection">This month: <span class="in">+${fmt(inAmt)}</span> <span class="out">-${fmt(outAmt)}</span></div>
+      <div class="account-projection">This month: <span class="in">+${formatCurrency(inAmt)}</span> <span class="out">-${formatCurrency(outAmt)}</span></div>
+      <div class="account-subrow">
+        <button type="button" class="btn-tiny account-add-expense" data-id="${account.id}">+ Log a spend</button>
+      </div>
     </li>
   `;
 }
 
-function fmt(minorUnits) {
-  return `${CURRENCY_SYMBOL}${(minorUnits / 100).toFixed(2)}`;
+function bankBalance(account, acctTxns) {
+  if (account.knownBalance == null || !account.knownBalanceDate) return null;
+  let balance = account.knownBalance;
+  for (const t of acctTxns) {
+    if (t.date <= account.knownBalanceDate) continue;
+    balance += t.direction === 'credit' ? t.amount : -t.amount;
+  }
+  return balance;
 }
 
 function escapeHtml(str) {

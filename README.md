@@ -8,12 +8,34 @@ Works fully offline once installed.
 ## Parsers supported so far
 - `js/parsers/hdfc-bank-savings.js` — HDFC Bank savings account statements
 - `js/parsers/hdfc-credit-card.js` — HDFC Bank credit card statements (any
-  co-branded card on HDFC's own template, not just one card product)
+  co-branded card on HDFC's own template - Swiggy, Millennia, UPI RuPay, etc.)
+- `js/parsers/icici-amazon-pay-credit-card.js` — ICICI Bank Amazon Pay card
 
 Each new bank/card statement format needs its own parser module added to
 `js/parsers/registry.js`. Give me a real statement PDF and I'll build it the
 same way — parse, then verify the totals reconcile against the statement's
 own figures before trusting it.
+
+## Manual entries against any account, and statement reconciliation
+The Add screen lets you log a manual entry against any account, not just
+Cash — including a credit card, before that month's statement even exists.
+When you later import that card's statement, `js/reconciliation.js` matches
+statement rows against your manual entries (same account, amount, and date
+within 3 days): a match replaces the manual entry with the statement's own
+data (keeping whatever category you'd already set), and anything left
+unmatched shows up in two places — manual entries the statement didn't
+confirm are listed on the import screen so you can double-check them, and
+statement rows you hadn't logged by hand are just new transactions to
+categorize in Review. This is how you catch recurring auto-payments you
+forgot about.
+
+## Billing cycles
+Every card account has a `billingCycleDay` (the day of month its statement
+closes) — set automatically from the first statement you import, or by hand
+from the Accounts screen (tap "Set billing cycle day"). `js/billing-cycle.js`
+uses it to figure out the currently-open cycle even before any statement
+exists for that card, so manual entries you log right after getting a card
+still land in the right cycle for the spend projection.
 
 ## Credit card bill payments and double-counting
 When both a bank and a card statement are imported, a debit in the bank
@@ -47,8 +69,17 @@ The data model says account `type` is `bank|card`. Phase 1 seeds a default
 attach — this is a small extension beyond the original spec, done because
 manual entries need an account and there's no cash type otherwise.
 
-## Currency symbol
-Set in `js/config.js` (`CURRENCY_SYMBOL`), defaults to ₹.
+## Currency symbol and formatting
+Symbol is set in `js/config.js` (`CURRENCY_SYMBOL`), defaults to ₹. All
+amounts are formatted through `js/format.js`, which uses `Intl.NumberFormat`
+with the `en-IN` locale so large numbers group the Indian way (₹12,34,567.89)
+instead of the Western way (₹1,234,567.89).
+
+## Bank balance
+A bank account's balance is a snapshot: the last imported statement's own
+closing balance and date (`account.knownBalance` / `knownBalanceDate`),
+adjusted forward by anything dated after that. It reads "Balance unknown"
+until you import at least one statement for that account.
 
 ## PDF parsing
 `js/vendor/pdf.min.js` and `pdf.worker.min.js` are pdf.js, downloaded once

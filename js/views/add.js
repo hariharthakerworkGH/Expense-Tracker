@@ -1,9 +1,10 @@
 import { put, getAll, newId } from '../db.js';
 import { CASH_ACCOUNT_ID } from '../config.js';
 
-export async function render(container) {
-  const categories = await getAll('categories');
+export async function render(container, params = {}) {
+  const [categories, accounts] = await Promise.all([getAll('categories'), getAll('accounts')]);
   const today = new Date().toISOString().slice(0, 10);
+  const initialAccountId = params.accountId && accounts.some((a) => a.id === params.accountId) ? params.accountId : CASH_ACCOUNT_ID;
 
   container.innerHTML = `
     <form id="add-form" class="add-form">
@@ -23,6 +24,12 @@ export async function render(container) {
         <button type="button" class="chip active" data-cat="">Uncategorized</button>
         ${categories.map((c) => `<button type="button" class="chip" data-cat="${c.id}">${escapeHtml(c.name)}</button>`).join('')}
       </div>
+      <label class="field">
+        <span>Account</span>
+        <select id="add-account">
+          ${accounts.map((a) => `<option value="${a.id}" ${a.id === initialAccountId ? 'selected' : ''}>${escapeHtml(a.label)}</option>`).join('')}
+        </select>
+      </label>
       <label class="field field-date">
         <span>Date</span>
         <input id="add-date" type="date" value="${today}">
@@ -51,6 +58,7 @@ export async function render(container) {
 
   const amountInput = container.querySelector('#add-amount');
   const dateInput = container.querySelector('#add-date');
+  const accountSelect = container.querySelector('#add-account');
   const form = container.querySelector('#add-form');
 
   form.addEventListener('submit', async (e) => {
@@ -60,7 +68,7 @@ export async function render(container) {
 
     const transaction = {
       id: newId(),
-      accountId: CASH_ACCOUNT_ID,
+      accountId: accountSelect.value,
       date: dateInput.value || today,
       rawDescription: container.querySelector('#add-desc').value.trim(),
       amount,
@@ -83,6 +91,7 @@ export async function render(container) {
     container.querySelectorAll('.dir-btn').forEach((b) => b.classList.toggle('active', b.dataset.dir === 'debit'));
     container.querySelectorAll('.chip').forEach((c) => c.classList.toggle('active', !c.dataset.cat));
     dateInput.value = today;
+    accountSelect.value = initialAccountId;
     amountInput.focus();
     setTimeout(() => {
       status.hidden = true;
