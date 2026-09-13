@@ -1,5 +1,5 @@
 const DB_NAME = 'expense-tracker';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -32,6 +32,10 @@ export function openDB() {
       }
       if (!db.objectStoreNames.contains('importBatches')) {
         db.createObjectStore('importBatches', { keyPath: 'id' });
+      }
+      // v2: simple key/value for things like expected monthly income.
+      if (!db.objectStoreNames.contains('settings')) {
+        db.createObjectStore('settings', { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -75,4 +79,13 @@ export async function remove(storeName, id) {
 
 export function newId() {
   return crypto.randomUUID();
+}
+
+export async function getSetting(key, fallback = null) {
+  const row = await get('settings', key);
+  return row ? row.value : fallback;
+}
+
+export async function setSetting(key, value) {
+  await put('settings', { id: key, value });
 }

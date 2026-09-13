@@ -10,8 +10,10 @@ export async function detectTransfers() {
   const [transactions, accounts] = await Promise.all([getAll('transactions'), getAll('accounts')]);
   const accountType = new Map(accounts.map((a) => [a.id, a.type]));
 
-  const payingDebits = transactions.filter((t) => !t.isTransfer && t.direction === 'debit' && accountType.get(t.accountId) !== 'card');
-  const cardCredits = transactions.filter((t) => !t.isTransfer && t.direction === 'credit' && accountType.get(t.accountId) === 'card');
+  // `transferManual` means you decided this one yourself - detection leaves it alone.
+  const auto = transactions.filter((t) => !t.transferManual);
+  const payingDebits = auto.filter((t) => !t.isTransfer && t.direction === 'debit' && accountType.get(t.accountId) !== 'card');
+  const cardCredits = auto.filter((t) => !t.isTransfer && t.direction === 'credit' && accountType.get(t.accountId) === 'card');
 
   const updates = [];
   for (const debit of payingDebits) {
@@ -24,11 +26,36 @@ export async function detectTransfers() {
     }
   }
 
+  // Pairing only works when both halves have been imported. In practice they
+  // often haven't: you pay the August card bill in September, so the bank
+  // statement has the debit while the card's matching "payment received" is in
+  // a cycle you haven't imported yet. Left alone, that bill payment counts as
+  // ordinary spending and gets flagged as a suspicious new merchant. So also
+  // recognise an unmatched half by how the bank itself describes it.
+  for (const t of auto) {
+    if (t.isTransfer || updates.includes(t)) continue;
+    if (!looksLikeCardPayment(t, accountType.get(t.accountId))) continue;
+    t.isTransfer = true;
+    updates.push(t);
+  }
+
   for (const t of updates) {
     delete t._claimed;
     await put('transactions', t);
   }
   return updates.length;
+}
+
+// Deliberately narrow: these wordings are card-bill settlements, not ordinary
+// bill payments. "BBPS" alone is not enough - electricity and gas go through
+// BBPS too - so it only counts alongside an explicit card-payment phrase.
+const PAYMENT_OUT_RE = /\b(CRED\b|CRED\.CLUB|CC\s*PAYMENT|CREDIT\s*CARD\s*(BILL\s*)?(PAYMENT|PMT)|PAYMENT\s*ON\s*CRED)/i;
+const PAYMENT_IN_RE = /\b(PAYMENT\s*RECEIVED|CC\s*PAYMENT|BPPY\s*CC|CRED\b|AUTOPAY\s*RECEIVED)/i;
+
+function looksLikeCardPayment(t, type) {
+  const desc = t.rawDescription || '';
+  if (type === 'card') return t.direction === 'credit' && PAYMENT_IN_RE.test(desc);
+  return t.direction === 'debit' && PAYMENT_OUT_RE.test(desc);
 }
 
 function daysApart(dateA, dateB) {

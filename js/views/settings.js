@@ -31,6 +31,10 @@ export async function render(container) {
       <p id="restore-status" class="status" hidden></p>
     </div>
 
+    <h3>Categories</h3>
+    <p class="group-subtitle">Rename, add or remove the categories you sort spending into.</p>
+    <button type="button" id="go-categories" class="btn-secondary btn-block">Manage categories</button>
+
     <h3>Import history</h3>
     <p class="group-subtitle">Undo an import if you loaded the wrong file or imported the same statement twice.</p>
     <div id="import-history"></div>
@@ -87,6 +91,10 @@ export async function render(container) {
     } catch (err) {
       showStatus(restoreStatus, err.message, true);
     }
+  });
+
+  container.querySelector('#go-categories').addEventListener('click', () => {
+    container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'categories' } }));
   });
 
   await renderImportHistory(container);

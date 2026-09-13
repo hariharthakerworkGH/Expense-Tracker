@@ -1,5 +1,6 @@
 import { openDB, getAll, put } from './db.js';
 import { CASH_ACCOUNT_ID } from './config.js';
+import { detectTransfers } from './transfers.js';
 import * as addView from './views/add.js';
 import * as categoriesView from './views/categories.js';
 import * as summaryView from './views/summary.js';
@@ -7,6 +8,7 @@ import * as transactionsView from './views/transactions.js';
 import * as accountsView from './views/accounts.js';
 import * as importView from './views/import.js';
 import * as settingsView from './views/settings.js';
+import * as planView from './views/plan.js';
 
 const SEED_CATEGORIES = [
   { id: 'cat-food', name: 'Food & Dining', parentId: null },
@@ -29,6 +31,7 @@ const views = {
   add: { title: 'Add', module: addView },
   transactions: { title: 'Transactions', module: transactionsView },
   accounts: { title: 'Accounts', module: accountsView },
+  plan: { title: 'Plan', module: planView },
   categories: { title: 'Categories', module: categoriesView },
   import: { title: 'Import Statement', module: importView },
   settings: { title: 'Backup & Settings', module: settingsView },
@@ -44,17 +47,67 @@ async function seedIfNeeded() {
   }
 }
 
-async function showView(name, params = {}) {
+let currentView = 'summary';
+
+async function showView(name, params = {}, fromHistory = false) {
   const view = views[name];
+  currentView = name;
   document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   document.getElementById('view-title').textContent = view.title;
   const container = document.getElementById('view-container');
   container.innerHTML = '';
   await view.module.render(container, params);
-  history.replaceState(null, '', `#${name}`);
+  // Replace rather than push: the history stack stays two deep (see
+  // wireBackButton) so back always means "go home", never "retrace twenty taps".
+  if (!fromHistory) history.replaceState({ view: name, params }, '', `#${name}`);
   // Switching tabs must land at the top - otherwise a screen you'd scrolled
   // down on leaves the NEXT screen opening mid-scroll, looking stuck/broken.
   window.scrollTo(0, 0);
+}
+
+export function showToast(message) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = message;
+  el.classList.add('visible');
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.remove('visible'), 2000);
+}
+
+// Back from any screen returns to Summary. Back from Summary arms an exit: a
+// second press within two seconds leaves the app, which is what Android users
+// expect. The stack is deliberately kept two deep - a root sentinel plus the
+// current screen - so someone who has tapped through fifteen screens still
+// gets home in one press instead of pressing back fifteen times.
+let exitArmed = false;
+function wireBackButton() {
+  history.replaceState({ view: '__root__' }, '', '#summary');
+  history.pushState({ view: 'summary', params: {} }, '', '#summary');
+
+  window.addEventListener('popstate', () => {
+    // We have just landed on the root sentinel. Put the current screen back on
+    // top so there is always something to pop next time.
+    if (currentView !== 'summary') {
+      history.pushState({ view: 'summary', params: {} }, '', '#summary');
+      showView('summary', {}, true);
+      return;
+    }
+    if (exitArmed) {
+      history.back();
+      return;
+    }
+    exitArmed = true;
+    showToast('Press back again to exit');
+    history.pushState({ view: 'summary', params: {} }, '', '#summary');
+    setTimeout(() => {
+      exitArmed = false;
+    }, 2000);
+  });
 }
 
 // The nav's real height depends on the device's font scaling and safe-area
@@ -69,6 +122,10 @@ function syncNavHeight() {
 async function init() {
   await openDB();
   await seedIfNeeded();
+  // Catches card-bill payments in statements imported before detection could
+  // recognise them. Skips anything you've marked by hand, and does nothing
+  // once everything is already classified.
+  await detectTransfers();
 
   syncNavHeight();
   window.addEventListener('resize', syncNavHeight);
@@ -85,8 +142,8 @@ async function init() {
     showView(view, params);
   });
 
-  const startView = (location.hash || '#summary').slice(1);
-  showView(views[startView] ? startView : 'summary');
+  wireBackButton();
+  await showView('summary', {}, true);
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch((err) => console.error('SW registration failed', err));

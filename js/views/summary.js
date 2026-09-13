@@ -1,4 +1,4 @@
-import { getAll, put } from '../db.js';
+import { getAll, put, getSetting, setSetting } from '../db.js';
 import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
 import { bankBalance, cardCycleSpend, cardBillDue } from '../account-metrics.js';
 import { detectRecurring, nextDueDate } from '../recurring.js';
@@ -90,26 +90,44 @@ async function renderAttention(container, transactions) {
   const el = container.querySelector('#attention-section');
   if (!el) return;
 
+  const accounts = await getAll('accounts');
   const uncategorizedCount = transactions.filter((t) => !t.categoryId).length;
   const monthStart = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`;
-  const anomalies = await detectAnomalies(monthStart);
+  const dismissed = new Set(await getSetting('dismissedAnomalies', []));
+  const anomalies = (await detectAnomalies(monthStart)).filter((a) => !dismissed.has(a.transaction.id));
 
-  if (uncategorizedCount === 0 && anomalies.length === 0) {
-    el.innerHTML = '';
+  const dueCards = accounts
+    .map((a) => ({ account: a, bill: cardBillDue(a) }))
+    .filter((x) => x.bill && !x.bill.paid && x.bill.daysLeft != null && x.bill.daysLeft <= 5);
+
+  if (uncategorizedCount === 0 && anomalies.length === 0 && dueCards.length === 0) {
+    el.innerHTML = `<h3>Needs your attention</h3><div class="totals-card"><p class="muted-note">Nothing to deal with right now.</p></div>`;
     return;
   }
 
   el.innerHTML = `
     <h3>Needs your attention</h3>
     <div class="totals-card">
-      ${uncategorizedCount > 0 ? `<div class="attention-row"><span>${uncategorizedCount} transaction${uncategorizedCount === 1 ? '' : 's'} need${uncategorizedCount === 1 ? 's' : ''} a category</span><button type="button" class="btn-tiny" id="go-transactions-btn">Review</button></div>` : ''}
+      ${dueCards
+        .map(
+          ({ account, bill }) => `
+        <div class="attention-row">
+          <span>${escapeHtml(account.label)} — ${formatCurrency(bill.amount)}<br><span class="muted-note bill-${bill.daysLeft < 0 ? 'overdue' : 'urgent'}">${bill.daysLeft < 0 ? `overdue by ${Math.abs(bill.daysLeft)}d` : bill.daysLeft === 0 ? 'due today' : `due in ${bill.daysLeft}d`}</span></span>
+          <button type="button" class="btn-tiny mark-paid" data-id="${account.id}">Mark paid</button>
+        </div>`
+        )
+        .join('')}
+      ${uncategorizedCount > 0 ? `<div class="attention-row"><span>${uncategorizedCount} transaction${uncategorizedCount === 1 ? '' : 's'} need${uncategorizedCount === 1 ? 's' : ''} a category</span><button type="button" class="btn-tiny" id="go-transactions-btn">Sort them</button></div>` : ''}
       ${anomalies
         .slice(0, 3)
         .map(
           (a) => `
         <div class="attention-row">
-          <span>${escapeHtml(a.transaction.rawDescription)} - ${formatCurrency(a.transaction.amount)}</span>
-          <span class="muted-note">${a.reason === 'new-merchant' ? 'new merchant' : `usually ~${formatCurrency(a.averageAmount)}`}</span>
+          <span>${escapeHtml(a.transaction.rawDescription.slice(0, 46))} — ${formatCurrency(a.transaction.amount)}<br><span class="muted-note">${a.reason === 'new-merchant' ? 'first time at this merchant' : `usually around ${formatCurrency(a.averageAmount)}`}</span></span>
+          <span class="attention-actions">
+            <button type="button" class="btn-tiny anomaly-open" data-desc="${escapeAttr(a.transaction.rawDescription.slice(0, 24))}">Open</button>
+            <button type="button" class="icon-btn anomaly-dismiss" data-id="${a.transaction.id}" aria-label="Dismiss">✕</button>
+          </span>
         </div>`
         )
         .join('')}
@@ -122,6 +140,29 @@ async function renderAttention(container, transactions) {
       container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'transactions', filter: 'uncategorized' } }));
     });
   }
+
+  el.querySelectorAll('.mark-paid').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const account = accounts.find((a) => a.id === btn.dataset.id);
+      account.statementDuePaid = true;
+      await put('accounts', account);
+      render(container);
+    });
+  });
+
+  el.querySelectorAll('.anomaly-open').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'transactions', search: btn.dataset.desc } }));
+    });
+  });
+
+  el.querySelectorAll('.anomaly-dismiss').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const list = await getSetting('dismissedAnomalies', []);
+      await setSetting('dismissedAnomalies', [...new Set([...list, btn.dataset.id])]);
+      render(container);
+    });
+  });
 }
 
 async function renderUpcoming(container) {
@@ -253,7 +294,6 @@ async function renderContent(container) {
   }
 
   const catName = (id) => (id === 'uncategorized' ? 'Uncategorized' : categories.find((c) => c.id === id)?.name || 'Uncategorized');
-  const acctName = (id) => accounts.find((a) => a.id === id)?.label || 'Unknown';
 
   content.innerHTML = `
     <div class="totals-card">
@@ -262,11 +302,51 @@ async function renderContent(container) {
       ${comparisonHtml}
       <div class="totals-row net"><span>Net</span><span>${formatSignedCurrency(totalIn - totalOut)}</span></div>
     </div>
-    <h3>By Category</h3>
+    <h3>Where it went</h3>
     <ul class="breakdown-list">${renderBreakdown(byCategory, catName)}</ul>
-    <h3>By Account</h3>
-    <ul class="breakdown-list">${renderBreakdown(byAccount, acctName)}</ul>
+    <h3>Which account paid</h3>
+    <p class="group-subtitle">Every account you've added. Ones you didn't touch in this period say so, rather than quietly vanishing.</p>
+    <ul class="breakdown-list">${renderAccountBreakdown(byAccount, accounts, transactions)}</ul>
   `;
+}
+
+// Unlike the category breakdown, this lists accounts with no activity too.
+// An account dropping off the list looks like a bug; "not used since 25 Aug"
+// is the actual answer to "why isn't my card here?".
+function renderAccountBreakdown(byAccount, accounts, transactions) {
+  const lastUsed = new Map();
+  for (const t of transactions) {
+    const prev = lastUsed.get(t.accountId);
+    if (!prev || t.date > prev) lastUsed.set(t.accountId, t.date);
+  }
+
+  // Accounts that spent money first, biggest first; then the idle ones by how
+  // recently they were used, with never-used accounts at the very bottom.
+  const rows = accounts
+    .map((a) => ({ account: a, bucket: byAccount.get(a.id) || { in: 0, out: 0 }, last: lastUsed.get(a.id) }))
+    .sort((x, y) => {
+      const xu = x.bucket.out || x.bucket.in;
+      const yu = y.bucket.out || y.bucket.in;
+      if (xu && yu) return y.bucket.out - y.bucket.in - (x.bucket.out - x.bucket.in);
+      if (xu !== yu) return xu ? -1 : 1;
+      return (y.last || '').localeCompare(x.last || '');
+    });
+
+  return rows
+    .map(({ account, bucket, last }) => {
+      const used = bucket.out || bucket.in;
+      const note = last ? `nothing in this period · last used ${formatDateNice(last)}` : 'never used';
+      return `
+      <li class="breakdown-row${used ? '' : ' breakdown-idle'}">
+        <span>${escapeHtml(account.label)}${used ? '' : `<br><span class="muted-note">${note}</span>`}</span>
+        <span class="amounts">
+          ${bucket.out ? `<span class="out">-${formatCurrency(bucket.out)}</span>` : ''}
+          ${bucket.in ? `<span class="in">+${formatCurrency(bucket.in)}</span>` : ''}
+          ${used ? '' : '<span class="muted">—</span>'}
+        </span>
+      </li>`;
+    })
+    .join('');
 }
 
 function addToBucket(map, key, t) {
@@ -295,4 +375,8 @@ function renderBreakdown(map, nameFn) {
 
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (s) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[s]));
+}
+
+function escapeAttr(str) {
+  return escapeHtml(str);
 }
