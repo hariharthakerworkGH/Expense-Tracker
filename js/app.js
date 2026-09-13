@@ -3,6 +3,9 @@ import { CASH_ACCOUNT_ID } from './config.js';
 import * as addView from './views/add.js';
 import * as categoriesView from './views/categories.js';
 import * as summaryView from './views/summary.js';
+import * as reviewView from './views/review.js';
+import * as accountsView from './views/accounts.js';
+import * as importView from './views/import.js';
 
 const SEED_CATEGORIES = [
   { id: 'cat-food', name: 'Food & Dining', parentId: null },
@@ -23,7 +26,10 @@ const SEED_ACCOUNT = { id: CASH_ACCOUNT_ID, label: 'Cash', type: 'cash', issuer:
 const views = {
   summary: { title: 'Summary', module: summaryView },
   add: { title: 'Add', module: addView },
+  review: { title: 'Review', module: reviewView },
+  accounts: { title: 'Accounts', module: accountsView },
   categories: { title: 'Categories', module: categoriesView },
+  import: { title: 'Import Statement', module: importView },
 };
 
 async function seedIfNeeded() {
@@ -53,6 +59,8 @@ async function init() {
   document.querySelectorAll('.nav-btn').forEach((btn) => {
     btn.addEventListener('click', () => showView(btn.dataset.view));
   });
+
+  document.addEventListener('navigate', (e) => showView(e.detail.view));
 
   const startView = (location.hash || '#summary').slice(1);
   showView(views[startView] ? startView : 'summary');

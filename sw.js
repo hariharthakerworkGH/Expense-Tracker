@@ -1,6 +1,6 @@
 // Bump this on every deploy that changes any cached file, otherwise
 // installed phones keep serving the old version from cache.
-const CACHE_NAME = 'expense-tracker-v1';
+const CACHE_NAME = 'expense-tracker-v3';
 
 const APP_SHELL = [
   './',
@@ -10,9 +10,20 @@ const APP_SHELL = [
   './js/app.js',
   './js/db.js',
   './js/config.js',
+  './js/pdf-text.js',
+  './js/merchant-rules.js',
+  './js/transfers.js',
   './js/views/add.js',
   './js/views/categories.js',
   './js/views/summary.js',
+  './js/views/review.js',
+  './js/views/accounts.js',
+  './js/views/import.js',
+  './js/parsers/registry.js',
+  './js/parsers/hdfc-bank-savings.js',
+  './js/parsers/hdfc-credit-card.js',
+  './js/vendor/pdf.min.js',
+  './js/vendor/pdf.worker.min.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];

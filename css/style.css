@@ -322,3 +322,128 @@ h3 {
   margin-left: 16px;
   margin-top: 6px;
 }
+
+.nav-btn span:last-child {
+  font-size: 0.65rem;
+}
+
+.import-intro {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin: 12px 0;
+}
+
+.import-row-list {
+  margin: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.import-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.import-row-top {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.import-row-top .ir-date {
+  flex: 0 0 130px;
+  font-size: 0.8rem;
+  padding: 8px;
+}
+
+.import-row-top .ir-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 8px;
+}
+
+.import-row-bottom {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.import-row-bottom .ir-amount {
+  flex: 0 0 90px;
+  padding: 8px;
+  font-size: 0.85rem;
+}
+
+.import-row-bottom .ir-category {
+  flex: 1;
+  min-width: 110px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.direction-toggle.small {
+  display: flex;
+  gap: 4px;
+}
+
+.direction-toggle.small .dir-btn {
+  padding: 8px 10px;
+  font-size: 0.75rem;
+}
+
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.review-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.review-row-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.review-desc {
+  font-size: 0.9rem;
+  margin-bottom: 10px;
+  word-break: break-word;
+}
+
+.review-transfer-toggle {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.review-transfer-toggle.active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+
+.account-projection {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
