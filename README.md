@@ -7,15 +7,27 @@ screen that projects your next credit card bill from spend since the last
 import. Works fully offline once installed.
 
 ## Parsers supported so far
-- `js/parsers/hdfc-bank-savings.js` — HDFC Bank savings account statements
+- `js/parsers/hdfc-bank-savings.js` — HDFC Bank savings statements, the
+  mailed/emailed "combined statement" template
+- `js/parsers/hdfc-bank-savings-netbanking.js` — the **same** HDFC savings
+  account, but the self-service "Statement of Account" export from
+  NetBanking - a completely different template (2-digit years, an extra
+  reference-number column, no explicit "0.00" for whichever of
+  withdrawal/deposit didn't happen, so direction is inferred from how the
+  running balance moved rather than which column has a value). The same
+  bank can export more than one statement layout depending on where you
+  downloaded it from - each one needs its own parser, they aren't
+  interchangeable even for the identical account.
 - `js/parsers/hdfc-credit-card.js` — HDFC Bank credit card statements (any
   co-branded card on HDFC's own template - Swiggy, Millennia, UPI RuPay, etc.)
 - `js/parsers/icici-amazon-pay-credit-card.js` — ICICI Bank Amazon Pay card
 
-Each new bank/card statement format needs its own parser module added to
-`js/parsers/registry.js`. Give me a real statement PDF and I'll build it the
+Each new statement template needs its own parser module added to
+`js/parsers/registry.js`, even when it's the same bank and account you've
+already got a parser for. Give me a real statement PDF and I'll build it the
 same way — parse, then verify the totals reconcile against the statement's
-own figures before trusting it.
+own figures (not just the closing balance - counts and sums per direction
+too) before trusting it.
 
 ## Manual entries against any account, and statement reconciliation
 The Add screen lets you log a manual entry against any account, not just
