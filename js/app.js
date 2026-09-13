@@ -3,7 +3,7 @@ import { CASH_ACCOUNT_ID } from './config.js';
 import * as addView from './views/add.js';
 import * as categoriesView from './views/categories.js';
 import * as summaryView from './views/summary.js';
-import * as reviewView from './views/review.js';
+import * as transactionsView from './views/transactions.js';
 import * as accountsView from './views/accounts.js';
 import * as importView from './views/import.js';
 
@@ -26,7 +26,7 @@ const SEED_ACCOUNT = { id: CASH_ACCOUNT_ID, label: 'Cash', type: 'cash', issuer:
 const views = {
   summary: { title: 'Summary', module: summaryView },
   add: { title: 'Add', module: addView },
-  review: { title: 'Review', module: reviewView },
+  transactions: { title: 'Transactions', module: transactionsView },
   accounts: { title: 'Accounts', module: accountsView },
   categories: { title: 'Categories', module: categoriesView },
   import: { title: 'Import Statement', module: importView },

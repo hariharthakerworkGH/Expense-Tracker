@@ -305,7 +305,7 @@ async function commit(resultsEl) {
   if (matchedCount) parts.push(`matched ${matchedCount} you'd already logged`);
   if (transferCount) parts.push(`flagged ${transferCount} as transfers`);
   if (unmatchedManual && unmatchedManual.length) parts.push(`${unmatchedManual.length} of your manual entries weren't found in the statement - check them above`);
-  showStatus(statusEl, `${parts.join('. ')}. Go to Review to categorize the rest.`, false);
+  showStatus(statusEl, `${parts.join('. ')}. Go to Transactions to categorize the rest.`, false);
   resultsEl.querySelector('#import-commit-btn').disabled = true;
   state = null;
 }

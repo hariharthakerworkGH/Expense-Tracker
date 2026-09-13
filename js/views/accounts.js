@@ -9,13 +9,14 @@ export async function render(container) {
   for (const a of accounts) (groups[a.type] || (groups[a.type] = [])).push(a);
 
   container.innerHTML = `
+    <p class="import-intro">Where your money lives: your bank balance, what you owe on each card, and cash on hand. Log spends here, or import a statement to bring in everything at once.</p>
     <div class="accounts-actions">
       <button type="button" id="go-import-btn" class="btn-secondary">Import a statement</button>
       <button type="button" id="add-account-btn" class="btn-secondary">Add an account</button>
     </div>
-    ${renderGroup('Cash', groups.cash, transactions, importBatches)}
-    ${renderGroup('Bank accounts', groups.bank, transactions, importBatches)}
-    ${renderGroup('Credit cards', groups.card, transactions, importBatches)}
+    ${renderGroup('Cash', 'Whatever you spend that never touches a bank or card.', groups.cash, transactions, importBatches)}
+    ${renderGroup('Bank accounts', 'Balance as of your last imported statement, adjusted for anything since.', groups.bank, transactions, importBatches)}
+    ${renderGroup('Credit cards', "What you'd owe if your bill closed today.", groups.card, transactions, importBatches)}
   `;
 
   container.querySelector('#go-import-btn').addEventListener('click', () => {
@@ -69,17 +70,16 @@ export async function render(container) {
   });
 }
 
-function renderGroup(title, accounts, transactions, importBatches) {
+function renderGroup(title, subtitle, accounts, transactions, importBatches) {
   if (!accounts || accounts.length === 0) return '';
   return `
     <h3>${title}</h3>
-    <ul class="cat-list">
-      ${accounts.map((a) => accountRow(a, transactions, importBatches)).join('')}
-    </ul>
+    <p class="group-subtitle">${subtitle}</p>
+    ${accounts.map((a) => accountCard(a, transactions, importBatches)).join('')}
   `;
 }
 
-function accountRow(account, transactions, importBatches) {
+function accountCard(account, transactions, importBatches) {
   const acctTxns = transactions.filter((t) => t.accountId === account.id);
 
   if (account.type === 'card') {
@@ -89,38 +89,37 @@ function accountRow(account, transactions, importBatches) {
       .reduce((s, t) => s + t.amount, 0);
 
     return `
-      <li class="cat-row">
-        <div class="cat-row-main">
+      <div class="totals-card account-card">
+        <div class="account-card-head">
           <span class="cat-name">${escapeHtml(account.label)}</span>
-          <span class="cat-actions">
-            <button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button>
-          </span>
+          <button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button>
         </div>
-        <div class="account-projection">
-          Current cycle spend<span class="muted">${cycleStart ? ` since ${cycleStart}` : ''}</span>: <strong class="out">${formatCurrency(cycleSpend)}</strong>
-        </div>
+        <div class="account-headline out">${formatCurrency(cycleSpend)}</div>
+        <div class="muted-note">${cycleStart ? `spent since your last statement (${formatDateNice(cycleStart)})` : 'spent so far - no billing cycle set yet'}</div>
         <div class="account-subrow">
-          <button type="button" class="icon-btn account-cycle-edit" data-id="${account.id}">
-            ${account.billingCycleDay ? `Bill closes day ${account.billingCycleDay}` : 'Set billing cycle day'}
+          <button type="button" class="btn-tiny account-cycle-edit" data-id="${account.id}">
+            ${account.billingCycleDay ? `Statement day: ${ordinal(account.billingCycleDay)} · Edit` : 'Set statement day'}
           </button>
           <button type="button" class="btn-tiny account-add-expense" data-id="${account.id}">+ Log a spend</button>
         </div>
-      </li>
+      </div>
     `;
   }
 
   if (account.type === 'bank') {
     const balance = bankBalance(account, acctTxns);
     return `
-      <li class="cat-row">
-        <div class="cat-row-main">
+      <div class="totals-card account-card">
+        <div class="account-card-head">
           <span class="cat-name">${escapeHtml(account.label)}</span>
-          <span class="cat-actions"><button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button></span>
+          <button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button>
         </div>
-        <div class="account-projection">
-          ${balance != null ? `Balance: <strong>${formatCurrency(balance)}</strong>` : 'Balance unknown - import a statement to see it'}
-        </div>
-      </li>
+        ${
+          balance != null
+            ? `<div class="account-headline">${formatCurrency(balance)}</div><div class="muted-note">as of ${formatDateNice(account.knownBalanceDate)}, adjusted for anything since</div>`
+            : `<p class="muted-note">Balance unknown - import a statement to see it.</p>`
+        }
+      </div>
     `;
   }
 
@@ -131,18 +130,17 @@ function accountRow(account, transactions, importBatches) {
   const outAmt = thisMonth.filter((t) => t.direction === 'debit').reduce((s, t) => s + t.amount, 0);
 
   return `
-    <li class="cat-row">
-      <div class="cat-row-main">
+    <div class="totals-card account-card">
+      <div class="account-card-head">
         <span class="cat-name">${escapeHtml(account.label)}</span>
-        <span class="cat-actions">
-          <button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button>
-        </span>
+        <button type="button" class="icon-btn account-rename" data-id="${account.id}">Rename</button>
       </div>
-      <div class="account-projection">This month: <span class="in">+${formatCurrency(inAmt)}</span> <span class="out">-${formatCurrency(outAmt)}</span></div>
+      <div class="account-headline out">${formatCurrency(outAmt)}</div>
+      <div class="muted-note">spent this month <span class="in">(+${formatCurrency(inAmt)} received)</span></div>
       <div class="account-subrow">
         <button type="button" class="btn-tiny account-add-expense" data-id="${account.id}">+ Log a spend</button>
       </div>
-    </li>
+    </div>
   `;
 }
 
@@ -154,6 +152,17 @@ function bankBalance(account, acctTxns) {
     balance += t.direction === 'credit' ? t.amount : -t.amount;
   }
   return balance;
+}
+
+function ordinal(n) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+function formatDateNice(isoDate) {
+  const d = new Date(isoDate);
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 function escapeHtml(str) {
