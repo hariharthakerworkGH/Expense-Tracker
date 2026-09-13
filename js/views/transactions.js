@@ -3,6 +3,7 @@ import { learnFromAssignment } from '../merchant-rules.js';
 import { formatCurrency } from '../format.js';
 import { categoryStyle } from '../category-style.js';
 import { isSplit, categorySlices, needsCategory, splitTotal } from '../splits.js';
+import { showToast } from '../toast.js';
 
 const PAGE_SIZE = 50;
 
@@ -72,6 +73,7 @@ export async function render(container, params = {}) {
         <option value="">Set category…</option>
         ${categoryOptions(null)}
       </select>
+      <button type="button" id="bulk-transfer" class="btn-tiny">Transfer</button>
       <button type="button" id="bulk-delete" class="btn-tiny danger">Delete</button>
     </div>
   `;
@@ -136,6 +138,23 @@ export async function render(container, params = {}) {
     }
     selected.clear();
     e.target.value = '';
+    renderList(container);
+  });
+
+  // Moving money to your own investment or savings account isn't spending, and
+  // there are usually several at once to clean up - hence a bulk action.
+  container.querySelector('#bulk-transfer').addEventListener('click', async () => {
+    let n = 0;
+    for (const id of selected) {
+      const t = cache.transactions.find((x) => x.id === id);
+      if (!t || t.isTransfer) continue;
+      t.isTransfer = true;
+      t.transferManual = true;
+      await put('transactions', t);
+      n++;
+    }
+    selected.clear();
+    showToast(`${n} marked as transfers, not spending`);
     renderList(container);
   });
 

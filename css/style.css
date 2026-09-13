@@ -80,6 +80,13 @@ html, body {
   min-height: 100%;
 }
 
+/* Reserve the scrollbar's width at all times. Without this, moving from a long
+   screen to a short one removes the scrollbar and every element jumps sideways
+   by its width. */
+html {
+  scrollbar-gutter: stable;
+}
+
 /* Several components set an explicit `display`, which beats the `hidden`
    attribute's user-agent `display: none`. Without this, anything toggled
    with `hidden` (the custom date range, status messages) stays visible. */
@@ -214,6 +221,22 @@ code {
   padding: 0 16px 32px;
   max-width: 520px;
   margin: 0 auto;
+  /* Stops a short screen (Add, Import) collapsing the page height so far that
+     the layout visibly snaps when you arrive from a long one. */
+  min-height: 70vh;
+}
+
+.view-enter {
+  animation: view-in 170ms ease-out;
+}
+
+@keyframes view-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-enter { animation: none; }
 }
 
 .bottom-nav {
@@ -1556,9 +1579,8 @@ h3 {
 /* ---------- Version / update ---------- */
 
 .update-banner {
-  position: sticky;
-  top: 0;
-  z-index: 25;
+  /* Not sticky: the header already sticks to top:0, and two stacked sticky
+     bars fight over the same spot and overlap as you scroll. */
   display: flex;
   align-items: center;
   justify-content: space-between;

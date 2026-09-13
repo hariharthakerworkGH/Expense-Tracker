@@ -63,14 +63,25 @@ async function showView(name, params = {}, fromHistory = false) {
   document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   document.getElementById('view-title').textContent = view.title;
   const container = document.getElementById('view-container');
+
+  // Scroll to the top BEFORE swapping content, not after. Doing it afterwards
+  // meant the new screen was painted at the old scroll position and then
+  // yanked upwards - which is the jerk you see on every tab change.
+  window.scrollTo(0, 0);
+
   container.innerHTML = '';
   await view.module.render(container, params);
+
   // Replace rather than push: the history stack stays two deep (see
   // wireBackButton) so back always means "go home", never "retrace twenty taps".
   if (!fromHistory) history.replaceState({ view: name, params }, '', `#${name}`);
-  // Switching tabs must land at the top - otherwise a screen you'd scrolled
-  // down on leaves the NEXT screen opening mid-scroll, looking stuck/broken.
-  window.scrollTo(0, 0);
+
+  // A short fade covers the gap between the blank container and the finished
+  // screen, so content arrives instead of popping. Opacity only - a transform
+  // here would re-anchor the position:fixed bulk bar inside the container.
+  container.classList.remove('view-enter');
+  void container.offsetWidth; // restart the animation on a repeat visit
+  container.classList.add('view-enter');
 }
 
 // Back from any screen returns to Summary. Back from Summary arms an exit: a
