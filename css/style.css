@@ -1553,6 +1553,38 @@ h3 {
   margin-left: 2px;
 }
 
+/* The exact JSON that would be sent to Google, shown before you ever ask. */
+.payload-preview {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin-top: 10px;
+  font-size: 0.68rem;
+  line-height: 1.45;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-muted);
+}
+
+.ai-answer .recap-line {
+  margin-bottom: 10px;
+  color: var(--text);
+}
+
+.ai-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.ai-list li {
+  margin-bottom: 6px;
+}
+
 /* ---------- Toast ---------- */
 
 .toast {

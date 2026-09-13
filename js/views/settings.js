@@ -7,11 +7,14 @@ import { showToast } from '../toast.js';
 import { getSyncConfig, saveSyncConfig, clearSyncConfig, syncNow, testToken, getSyncPassphrase, setSyncPassphrase } from '../sync.js';
 import { cycleAwareEnabled } from '../budgets.js';
 import { CYCLE_SETTING_KEY } from '../spending-month.js';
+import { getApiKey, setApiKey, testApiKey, includeMerchants, setIncludeMerchants } from '../ai.js';
 
 export async function render(container) {
   const sync = await getSyncConfig();
   const syncPass = await getSyncPassphrase();
   const cycleAware = await cycleAwareEnabled();
+  const aiKey = await getApiKey();
+  const aiMerchants = await includeMerchants();
   const enabled = await remindersEnabled();
   const permission = permissionState();
   const daysBefore = await reminderDaysBefore();
@@ -65,6 +68,39 @@ export async function render(container) {
           </div>`
         : ''
     }
+
+    <h3>Ask-anything (Google Gemini)</h3>
+    <p class="group-subtitle">Optional. The Coach's three built-in questions are worked out on this device; open-ended ones need a language model. This is the only feature that sends anything off your phone.</p>
+    <div class="totals-card">
+      ${
+        aiKey
+          ? `<div class="attention-row">
+              <span>Connected to Gemini<br><span class="muted-note">Key saved on this device only — it never syncs.</span></span>
+              <button type="button" class="btn-tiny danger" id="ai-remove">Remove</button>
+            </div>
+            <div class="attention-row">
+              <span>Include merchant names<br><span class="muted-note">${
+                aiMerchants
+                  ? 'On — your top 15 merchants go with the summary. Better answers, more detail leaves the device.'
+                  : 'Off — only category totals are sent. More private, vaguer answers.'
+              }</span></span>
+              <button type="button" class="btn-tiny" id="ai-merchants">${aiMerchants ? 'Turn off' : 'Turn on'}</button>
+            </div>
+            <p class="muted-note">Raw transactions are never sent. You can see the exact payload on the Coach screen before asking anything.</p>`
+          : `<ol class="setup-steps">
+              <li>Go to <strong>aistudio.google.com/apikey</strong> and sign in with your Google account.</li>
+              <li>Click <strong>Create API key</strong>. Choose any project it offers, or let it make one.</li>
+              <li>Copy the key it shows you and paste it below.</li>
+            </ol>
+            <p class="muted-note">The free tier needs no card. Your Gemini Pro subscription is separate and doesn't work here.</p>
+            <label class="field">
+              <span>Gemini API key</span>
+              <input type="password" id="ai-key" placeholder="AIza…" autocomplete="off">
+            </label>
+            <button type="button" class="btn-primary" id="ai-connect">Connect</button>
+            <p id="ai-status" class="status" hidden></p>`
+      }
+    </div>
 
     <h3>How months are counted</h3>
     <div class="totals-card">
@@ -138,6 +174,38 @@ export async function render(container) {
   `;
 
   wireSync(container);
+
+  const aiConnect = container.querySelector('#ai-connect');
+  if (aiConnect) {
+    aiConnect.addEventListener('click', async () => {
+      const statusEl = container.querySelector('#ai-status');
+      const key = container.querySelector('#ai-key').value.trim();
+      if (!key) return showStatus(statusEl, 'Paste your key first.', true);
+      showStatus(statusEl, 'Checking with Google…', false);
+      const check = await testApiKey(key);
+      if (!check.ok) return showStatus(statusEl, check.reason, true);
+      await setApiKey(key);
+      showToast('Gemini connected');
+      render(container);
+    });
+  }
+
+  const aiRemove = container.querySelector('#ai-remove');
+  if (aiRemove) {
+    aiRemove.addEventListener('click', async () => {
+      await setApiKey(null);
+      showToast('Key removed');
+      render(container);
+    });
+  }
+
+  const aiMerchantsBtn = container.querySelector('#ai-merchants');
+  if (aiMerchantsBtn) {
+    aiMerchantsBtn.addEventListener('click', async () => {
+      await setIncludeMerchants(!aiMerchants);
+      render(container);
+    });
+  }
 
   container.querySelector('#cycle-toggle').addEventListener('click', async () => {
     await setSetting(CYCLE_SETTING_KEY, !cycleAware);

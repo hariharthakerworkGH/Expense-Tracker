@@ -1,6 +1,6 @@
 // Bump this on every deploy that changes any cached file, otherwise
 // installed phones keep serving the old version from cache.
-const CACHE_NAME = 'expense-tracker-v16';
+const CACHE_NAME = 'expense-tracker-v17';
 
 const APP_SHELL = [
   './',
@@ -29,6 +29,7 @@ const APP_SHELL = [
   './js/planner.js',
   './js/sync.js',
   './js/spending-month.js',
+  './js/ai.js',
   './js/views/coach.js',
   './js/views/add.js',
   './js/views/categories.js',

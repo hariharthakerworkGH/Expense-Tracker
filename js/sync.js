@@ -80,8 +80,17 @@ export async function syncNow(passphrase, { onProgress = () => {} } = {}) {
   let remote = null;
   let resolvedGistId = gistId;
 
-  if (gistId) {
-    const found = await fetchGist(token, gistId);
+  // The second device you set up has a token but no gist id yet. Without this
+  // it would create its own gist and the two devices would sync happily to
+  // different files forever, each convinced it was working.
+  if (!resolvedGistId) {
+    onProgress('Looking for your existing gist…');
+    resolvedGistId = await findExistingGist(token);
+    if (resolvedGistId) await setMeta('gistId', resolvedGistId);
+  }
+
+  if (resolvedGistId) {
+    const found = await fetchGist(token, resolvedGistId);
     if (!found) throw new SyncError('That gist no longer exists. Disconnect and set sync up again.');
     if (found.content) {
       onProgress('Decrypting…');
@@ -225,6 +234,16 @@ async function fetchGist(token, gistId) {
     return { content: await raw.text() };
   }
   return { content: file.content };
+}
+
+// Looks through your own gists for the one this app already made, so a second
+// device joins the existing sync instead of starting a rival one.
+async function findExistingGist(token) {
+  const res = await fetch(`${API}/gists?per_page=100`, { headers: headers(token) });
+  await assertOk(res, 'list your gists');
+  const gists = await res.json();
+  const match = gists.find((g) => g.files && g.files[GIST_FILENAME]);
+  return match ? match.id : null;
 }
 
 async function createGist(token, content) {
