@@ -1,4 +1,4 @@
-﻿// A card's billing cycle closes on the same day-of-month every statement
+// A card's billing cycle closes on the same day-of-month every statement
 // (the "billingCycleDay"). Given that, and no more recent real statement,
 // we can still tell which transactions belong to the currently-open cycle
 // (not yet billed) so manual entries logged before any statement exists

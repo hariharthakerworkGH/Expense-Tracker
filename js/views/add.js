@@ -2,6 +2,8 @@ import { put, getAll, newId } from '../db.js';
 import { CASH_ACCOUNT_ID } from '../config.js';
 import { categoryStyle } from '../category-style.js';
 import { showToast } from '../toast.js';
+import { FREQUENCIES, DEFAULT_FREQUENCY, toMonthly, toYearly } from '../frequency.js';
+import { formatCurrency } from '../format.js';
 
 export async function render(container, params = {}) {
   const [categories, accounts] = await Promise.all([getAll('categories'), getAll('accounts')]);
@@ -39,6 +41,21 @@ export async function render(container, params = {}) {
         <span>Date</span>
         <input id="add-date" type="date" value="${today}">
       </label>
+      <label class="checkbox-row">
+        <input type="checkbox" id="add-repeats">
+        <span>This repeats — count it in my monthly plan</span>
+      </label>
+      <div id="add-repeat-options" hidden>
+        <label class="field">
+          <span>How often</span>
+          <select id="add-frequency">
+            ${Object.entries(FREQUENCIES)
+              .map(([key, f]) => `<option value="${key}" ${key === DEFAULT_FREQUENCY ? 'selected' : ''}>${f.label}</option>`)
+              .join('')}
+          </select>
+        </label>
+        <p class="freq-preview" id="add-freq-preview" hidden></p>
+      </div>
       <button type="submit" class="btn-primary">Save</button>
     </form>
   `;
@@ -65,6 +82,31 @@ export async function render(container, params = {}) {
   const accountSelect = container.querySelector('#add-account');
   const form = container.querySelector('#add-form');
 
+  // "This repeats" turns a one-off entry into a standing commitment as well,
+  // so ₹120 of chai logged once becomes ₹3,650 a month in the plan without
+  // you having to work that out or enter it twice.
+  const repeatsEl = container.querySelector('#add-repeats');
+  const repeatOptions = container.querySelector('#add-repeat-options');
+  const frequencyEl = container.querySelector('#add-frequency');
+  const freqPreview = container.querySelector('#add-freq-preview');
+
+  const updateRepeatPreview = () => {
+    repeatOptions.hidden = !repeatsEl.checked;
+    const raw = parseFloat(amountInput.value);
+    if (!repeatsEl.checked || !Number.isFinite(raw) || raw <= 0) {
+      freqPreview.hidden = true;
+      return;
+    }
+    const minor = Math.round(raw * 100);
+    const monthly = toMonthly(minor, frequencyEl.value);
+    const yearly = toYearly(minor, frequencyEl.value);
+    freqPreview.hidden = false;
+    freqPreview.innerHTML = `That's <strong>${formatCurrency(monthly)} a month</strong> — ${formatCurrency(yearly)} a year.`;
+  };
+  repeatsEl.addEventListener('change', updateRepeatPreview);
+  frequencyEl.addEventListener('change', updateRepeatPreview);
+  amountInput.addEventListener('input', updateRepeatPreview);
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const amount = Math.round(parseFloat(amountInput.value) * 100);
@@ -85,9 +127,27 @@ export async function render(container, params = {}) {
     };
     await put('transactions', transaction);
 
-    showToast(`Saved ${direction === 'debit' ? '-' : '+'}₹${(amount / 100).toLocaleString('en-IN')}`);
+    if (repeatsEl.checked) {
+      const frequency = frequencyEl.value;
+      await put('recurring', {
+        id: `fixed-${newId()}`,
+        label: transaction.rawDescription || 'Repeating expense',
+        amount,
+        frequency,
+        dayOfMonth: new Date(transaction.date).getDate(),
+        categoryId,
+        accountId: transaction.accountId,
+        active: true,
+        source: 'fixed',
+      });
+      showToast(`Saved · ${formatCurrency(toMonthly(amount, frequency))} a month in your plan`);
+    } else {
+      showToast(`Saved ${direction === 'debit' ? '-' : '+'}₹${(amount / 100).toLocaleString('en-IN')}`);
+    }
 
     form.reset();
+    repeatOptions.hidden = true;
+    freqPreview.hidden = true;
     direction = 'debit';
     categoryId = null;
     container.querySelectorAll('.dir-btn').forEach((b) => b.classList.toggle('active', b.dataset.dir === 'debit'));

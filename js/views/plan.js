@@ -3,6 +3,7 @@ import { formatCurrency, formatSignedCurrency, ordinal } from '../format.js';
 import { detectRecurring } from '../recurring.js';
 import { categoryStyle } from '../category-style.js';
 import { getBudgets, setBudget, budgetStatus, spendByCategory, monthStartISO } from '../budgets.js';
+import { FREQUENCIES, DEFAULT_FREQUENCY, monthlyAmountOf, frequencyOf, frequencyShort, hasDueDate, toMonthly, toYearly } from '../frequency.js';
 
 let adding = false;
 let addingBudget = false;
@@ -22,7 +23,9 @@ export async function render(container) {
   ]);
 
   const fixed = recurring.filter((r) => isFixed(r) && r.active !== false);
-  const fixedTotal = fixed.reduce((s, r) => s + r.amount, 0);
+  // Each commitment is stored the way you entered it ("₹120 a day"); what the
+  // budget needs is its monthly equivalent.
+  const fixedTotal = fixed.reduce((s, r) => s + monthlyAmountOf(r), 0);
   const fixedCategoryIds = new Set(fixed.map((r) => r.categoryId).filter(Boolean));
 
   const now = new Date();
@@ -148,16 +151,42 @@ export async function render(container) {
 
   const form = container.querySelector('#fixed-form');
   if (form) {
+    // Show what the entered figure works out to per month as it's typed - the
+    // whole point of asking for a frequency is that you see the real cost.
+    const amountEl = form.querySelector('.ff-amount');
+    const freqEl = form.querySelector('.ff-frequency');
+    const previewEl = form.querySelector('#ff-preview');
+    const dayField = form.querySelector('.ff-day-field');
+
+    const updatePreview = () => {
+      const raw = parseFloat(amountEl.value);
+      const freq = freqEl.value;
+      dayField.hidden = !hasDueDate(freq);
+      if (!Number.isFinite(raw) || raw <= 0 || freq === 'monthly') {
+        previewEl.hidden = true;
+        return;
+      }
+      const minor = Math.round(raw * 100);
+      const monthly = toMonthly(minor, freq);
+      const yearly = toYearly(minor, freq);
+      previewEl.hidden = false;
+      previewEl.innerHTML = `That's <strong>${formatCurrency(monthly)} a month</strong> — ${formatCurrency(yearly)} a year.`;
+    };
+    amountEl.addEventListener('input', updatePreview);
+    freqEl.addEventListener('change', updatePreview);
+    updatePreview();
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const label = form.querySelector('.ff-label').value.trim();
-      const amount = Math.round(parseFloat(form.querySelector('.ff-amount').value) * 100);
+      const amount = Math.round(parseFloat(amountEl.value) * 100);
       const day = parseInt(form.querySelector('.ff-day').value, 10);
       if (!label || !Number.isFinite(amount) || amount <= 0) return;
       await put('recurring', {
         id: `fixed-${newId()}`,
         label,
         amount,
+        frequency: freqEl.value,
         dayOfMonth: Number.isInteger(day) && day >= 1 && day <= 31 ? day : 1,
         categoryId: form.querySelector('.ff-category').value || null,
         accountId: null,
@@ -219,6 +248,7 @@ export async function render(container) {
         id: `fixed-${newId()}`,
         label: d.label,
         amount: d.amount,
+        frequency: 'monthly',
         dayOfMonth: d.dayOfMonth,
         categoryId: d.categoryId,
         accountId: d.accountId,
@@ -274,14 +304,25 @@ function budgetForm(categories) {
 function fixedRow(f, categories) {
   const cat = categories.find((c) => c.id === f.categoryId);
   const { icon, color } = categoryStyle(cat?.name || f.label);
+  const freq = frequencyOf(f);
+  const monthly = monthlyAmountOf(f);
+  const isMonthly = freq === 'monthly';
+
+  // For anything that isn't already monthly, show both figures: what you
+  // actually pay, and what it costs you per month. The second number is the
+  // one people never work out for themselves.
+  const detail = isMonthly
+    ? `${cat ? escapeHtml(cat.name) + ' · ' : ''}due around the ${ordinal(f.dayOfMonth)}`
+    : `${formatCurrency(f.amount)} ${frequencyShort(freq)}${hasDueDate(freq) ? ` · around the ${ordinal(f.dayOfMonth)}` : ''}${cat ? ` · ${escapeHtml(cat.name)}` : ''}`;
+
   return `
     <div class="attention-row">
       <span class="breakdown-label">
         <span class="cat-chip" style="--chip-color:${color}">${icon}</span>
-        <span>${escapeHtml(f.label)}<br><span class="muted-note">${cat ? escapeHtml(cat.name) + ' · ' : ''}due around the ${ordinal(f.dayOfMonth)}</span></span>
+        <span>${escapeHtml(f.label)}<br><span class="muted-note">${detail}</span></span>
       </span>
       <span class="fixed-row-right">
-        <span class="out">${formatCurrency(f.amount)}</span>
+        <span class="out">${formatCurrency(monthly)}${isMonthly ? '' : '<span class="muted freq-per-month">/mo</span>'}</span>
         <button type="button" class="icon-btn fixed-delete" data-id="${f.id}" aria-label="Remove">✕</button>
       </span>
     </div>
@@ -293,13 +334,22 @@ function fixedForm(categories) {
     <form class="totals-card" id="fixed-form">
       <label class="field">
         <span>What is it</span>
-        <input type="text" class="ff-label" placeholder="e.g. House rent" required>
+        <input type="text" class="ff-label" placeholder="e.g. House rent, or morning chai" required>
       </label>
       <label class="field">
-        <span>Amount each month</span>
+        <span>Amount each time</span>
         <input type="number" class="ff-amount" inputmode="decimal" step="0.01" min="0.01" placeholder="40000" required>
       </label>
       <label class="field">
+        <span>How often</span>
+        <select class="ff-frequency">
+          ${Object.entries(FREQUENCIES)
+            .map(([key, f]) => `<option value="${key}" ${key === DEFAULT_FREQUENCY ? 'selected' : ''}>${f.label}</option>`)
+            .join('')}
+        </select>
+      </label>
+      <p class="freq-preview" id="ff-preview" hidden></p>
+      <label class="field ff-day-field">
         <span>Day of month it's due</span>
         <input type="number" class="ff-day" min="1" max="31" placeholder="1">
       </label>

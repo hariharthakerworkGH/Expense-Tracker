@@ -1359,6 +1359,140 @@ h3 {
   font-weight: 700;
 }
 
+/* ---------- Coach ---------- */
+
+.coach-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.coach-q {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.coach-q.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.coach-q-icon {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.coach-panel {
+  background: var(--surface-alt);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  margin-bottom: 18px;
+  animation: recap-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.coach-panel .totals-card {
+  background: var(--bg);
+  margin-bottom: 12px;
+}
+
+.coach-answer {
+  margin-top: 16px;
+}
+
+.coach-verdict {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin: 0 0 8px;
+}
+
+.coach-verdict.good {
+  color: var(--in);
+}
+
+.coach-verdict.warn {
+  color: var(--warn);
+}
+
+.coach-verdict.bad {
+  color: var(--out);
+}
+
+.coach-note {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-hi);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+
+.coach-note-warn {
+  border-left-color: var(--warn);
+}
+
+.coach-note-good {
+  border-left-color: var(--in);
+}
+
+.coach-note-info {
+  border-left-color: var(--violet);
+}
+
+.coach-note strong {
+  display: block;
+  font-size: 0.93rem;
+  margin-bottom: 3px;
+}
+
+.coach-note .muted-note {
+  margin: 0;
+}
+
+.coach-note-icon {
+  font-size: 1rem;
+  line-height: 1.3;
+}
+
+.coach-footnote {
+  text-align: center;
+  margin-top: 22px;
+  padding: 0 12px;
+}
+
+/* What a repeating amount works out to per month, shown as you type it. */
+.freq-preview {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  padding: 10px 13px;
+  margin: 0 0 16px;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.freq-per-month {
+  font-size: 0.72rem;
+  margin-left: 2px;
+}
+
 /* ---------- Toast ---------- */
 
 .toast {

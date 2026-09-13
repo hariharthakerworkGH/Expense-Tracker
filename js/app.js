@@ -11,6 +11,7 @@ import * as importView from './views/import.js';
 import * as settingsView from './views/settings.js';
 import * as planView from './views/plan.js';
 import * as recapView from './views/recap.js';
+import * as coachView from './views/coach.js';
 import { refreshSchedule, runDueReminders } from './reminders.js';
 
 const SEED_CATEGORIES = [
@@ -35,6 +36,7 @@ const views = {
   transactions: { title: 'Transactions', module: transactionsView },
   accounts: { title: 'Accounts', module: accountsView },
   plan: { title: 'Plan', module: planView },
+  coach: { title: 'Coach', module: coachView },
   recap: { title: 'Month in review', module: recapView },
   categories: { title: 'Categories', module: categoriesView },
   import: { title: 'Import Statement', module: importView },
