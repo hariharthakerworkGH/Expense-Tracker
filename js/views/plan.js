@@ -2,7 +2,8 @@ import { getAll, put, remove, newId, getSetting, setSetting } from '../db.js';
 import { formatCurrency, formatSignedCurrency, ordinal } from '../format.js';
 import { detectRecurring } from '../recurring.js';
 import { categoryStyle } from '../category-style.js';
-import { getBudgets, setBudget, budgetStatus, spendByCategory, monthStartISO } from '../budgets.js';
+import { getBudgets, setBudget, budgetStatusForMonth, spendByCategoryForMonth, cycleAwareEnabled } from '../budgets.js';
+import { currentMonthKey, cycleExplanation } from '../spending-month.js';
 import { FREQUENCIES, DEFAULT_FREQUENCY, monthlyAmountOf, frequencyOf, frequencyShort, hasDueDate, toMonthly, toYearly } from '../frequency.js';
 
 let adding = false;
@@ -29,10 +30,12 @@ export async function render(container) {
   const fixedCategoryIds = new Set(fixed.map((r) => r.categoryId).filter(Boolean));
 
   const now = new Date();
-  const monthStart = monthStartISO(now);
+  const monthKey = currentMonthKey(now);
+  const accounts = await getAll('accounts');
+  const cycleAware = await cycleAwareEnabled();
   // Spending on a category that a fixed commitment already covers would be
   // counted twice - once in the commitment, once here.
-  const spentMap = spendByCategory(transactions, monthStart);
+  const spentMap = spendByCategoryForMonth(transactions, accounts, monthKey, cycleAware);
   let variableSpent = 0;
   for (const [categoryId, amount] of spentMap) {
     if (fixedCategoryIds.has(categoryId)) continue;
@@ -61,7 +64,7 @@ export async function render(container) {
       )
   );
 
-  const budgetRows = budgetStatus(budgets, categories, transactions, monthStart);
+  const budgetRows = await budgetStatusForMonth(budgets, categories, transactions, monthKey);
   const budgetable = categories.filter((c) => !budgets[c.id] && !/income|transfer/i.test(c.name));
 
   container.innerHTML = `
@@ -106,7 +109,9 @@ export async function render(container) {
     ${adding ? fixedForm(categories) : '<button type="button" id="plan-add-btn" class="btn-secondary btn-block">Add a fixed expense</button>'}
 
     <h3>Budgets</h3>
-    <p class="group-subtitle">A monthly ceiling for the categories you want to keep an eye on. You'll get a nudge on the Summary before you blow through one.</p>
+    <p class="group-subtitle">A monthly ceiling for the categories you want to keep an eye on. You'll get a nudge on the Summary before you blow through one.${
+      cycleExplanation(accounts, cycleAware) ? ` ${escapeHtml(cycleExplanation(accounts, cycleAware))}` : ''
+    }</p>
     ${budgetRows.length ? budgetRows.map((b) => budgetCard(b)).join('') : '<p class="empty">No budgets set.</p>'}
     ${
       addingBudget

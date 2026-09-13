@@ -1,4 +1,5 @@
-import { openDB, getAll, put } from './db.js';
+import { openDB, getAll, put, onLocalChange } from './db.js';
+import { getSyncConfig, getSyncPassphrase, syncNow } from './sync.js';
 import { CASH_ACCOUNT_ID } from './config.js';
 import { detectTransfers } from './transfers.js';
 import { showToast } from './toast.js';
@@ -102,6 +103,60 @@ function wireBackButton() {
   });
 }
 
+// Sync runs on open so the other device's changes are already here before you
+// start reading numbers, and again a few seconds after you change anything.
+// The delay batches a burst of edits - categorising thirty rows is one upload,
+// not thirty.
+const PUSH_DELAY_MS = 4000;
+let pushTimer = null;
+let syncing = false;
+
+async function runSync({ silent = true } = {}) {
+  if (syncing) return;
+  const [{ configured }, passphrase] = await Promise.all([getSyncConfig(), getSyncPassphrase()]);
+  if (!configured || !passphrase) return;
+  syncing = true;
+  setSyncIndicator('syncing');
+  try {
+    const result = await syncNow(passphrase);
+    setSyncIndicator('ok');
+    const { added, updated, deleted } = result.pulled;
+    if (!silent && (added || updated || deleted)) {
+      showToast(`Synced: ${added} new, ${updated} updated`);
+    }
+    // Bringing in another device's changes makes what's on screen stale.
+    if (added || updated || deleted) await showView(currentView, {}, true);
+  } catch (err) {
+    setSyncIndicator('error', err.message);
+  } finally {
+    syncing = false;
+  }
+}
+
+function setSyncIndicator(state, title = '') {
+  const el = document.getElementById('sync-indicator');
+  if (!el) return;
+  el.hidden = state === 'ok';
+  el.textContent = state === 'syncing' ? '↻' : '!';
+  el.className = `sync-indicator ${state}`;
+  el.title = state === 'error' ? title : 'Syncing…';
+}
+
+function wireSync() {
+  onLocalChange(() => {
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => runSync(), PUSH_DELAY_MS);
+  });
+
+  runSync({ silent: false });
+
+  // Coming back to the app after it's been in the background is exactly when
+  // the other device is most likely to have moved on.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') runSync({ silent: false });
+  });
+}
+
 // The nav's real height depends on the device's font scaling and safe-area
 // inset, so measure it instead of guessing - otherwise it sits on top of the
 // last rows of content.
@@ -150,6 +205,8 @@ async function init() {
   refreshSchedule()
     .then(() => runDueReminders())
     .catch(() => {});
+
+  wireSync();
 }
 
 init();

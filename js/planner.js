@@ -1,5 +1,6 @@
 import { getAll, getSetting } from './db.js';
-import { spendByCategory, monthStartISO, getBudgets } from './budgets.js';
+import { spendByCategoryForMonth, monthStartISO, getBudgets, cycleAwareEnabled } from './budgets.js';
+import { currentMonthKey, previousMonthKey } from './spending-month.js';
 import { monthlyAmountOf, yearlyAmountOf } from './frequency.js';
 
 // The planning engine.
@@ -15,12 +16,14 @@ const DISCRETIONARY_EXCLUDE = /rent|emi|loan|insurance|tax|income|transfer|bill|
 // A single read of everything the other functions need, so a screen asking
 // four questions doesn't hit the database four times.
 export async function financialSnapshot(now = new Date()) {
-  const [transactions, categories, recurring, income, budgets] = await Promise.all([
+  const [transactions, categories, recurring, income, budgets, accounts, cycleAware] = await Promise.all([
     getAll('transactions'),
     getAll('categories'),
     getAll('recurring'),
     getSetting('monthlyIncome', null),
     getBudgets(),
+    getAll('accounts'),
+    cycleAwareEnabled(),
   ]);
 
   const fixed = recurring.filter((r) => r.source === 'fixed' && r.active !== false);
@@ -34,7 +37,7 @@ export async function financialSnapshot(now = new Date()) {
 
   // Spending a fixed commitment already accounts for must not be counted
   // again here, or every rent payment would look like a budget blowout.
-  const spentMap = spendByCategory(transactions, monthStart);
+  const spentMap = spendByCategoryForMonth(transactions, accounts, currentMonthKey(now), cycleAware);
   let variableSpent = 0;
   for (const [categoryId, amount] of spentMap) {
     if (fixedCategoryIds.has(categoryId)) continue;
@@ -71,7 +74,9 @@ export async function financialSnapshot(now = new Date()) {
     projectedOver,
     perDayAllowance: leftToSpend != null && daysLeft > 0 ? Math.floor(leftToSpend / daysLeft) : null,
     spentMap,
-    categoryAverages: monthlyAveragesByCategory(transactions, now),
+    accounts,
+    cycleAware,
+    categoryAverages: monthlyAveragesByCategory(transactions, accounts, cycleAware, now),
     categoryName: (id) => (id === 'uncategorized' ? 'Uncategorized' : categories.find((c) => c.id === id)?.name || 'Uncategorized'),
   };
 }
@@ -79,19 +84,18 @@ export async function financialSnapshot(now = new Date()) {
 // Average monthly spend per category across the last three *complete* months.
 // The current month is excluded - halfway through, it would drag every average
 // down and make today's spending look unusually high.
-function monthlyAveragesByCategory(transactions, now) {
+function monthlyAveragesByCategory(transactions, accounts, cycleAware, now) {
   const months = [];
+  let key = currentMonthKey(now);
   for (let i = 1; i <= 3; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    key = previousMonthKey(key);
+    months.push(key);
   }
 
   const totals = new Map();
   const monthsWithData = new Set();
   for (const month of months) {
-    const from = `${month}-01`;
-    const to = `${month}-31`;
-    const map = spendByCategory(transactions, from, to);
+    const map = spendByCategoryForMonth(transactions, accounts, month, cycleAware);
     if (map.size === 0) continue;
     monthsWithData.add(month);
     for (const [categoryId, amount] of map) {

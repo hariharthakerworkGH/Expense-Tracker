@@ -1,5 +1,6 @@
-import { getSetting, setSetting } from './db.js';
+import { getSetting, setSetting, getAll } from './db.js';
 import { categorySlices } from './splits.js';
+import { spendingMonthOf, accountMap, CYCLE_SETTING_KEY } from './spending-month.js';
 
 // Budgets are a plain map of categoryId -> monthly limit in paise, kept in the
 // settings store rather than their own table: there are only ever a handful,
@@ -24,10 +25,20 @@ export function monthStartISO(date = new Date()) {
 // Spend per category for a period, split-aware. Credits and transfers never
 // count against a budget - a refund shouldn't quietly buy you more headroom.
 export function spendByCategory(transactions, from, to = '9999-12-31') {
+  return tally(transactions.filter((t) => t.date >= from && t.date <= to));
+}
+
+// The same tally, but for a billing-cycle month rather than a calendar range:
+// a card purchase after its statement day counts towards the next month.
+export function spendByCategoryForMonth(transactions, accounts, monthKey, cycleAware = true) {
+  const byId = accountMap(accounts);
+  return tally(transactions.filter((t) => spendingMonthOf(t, byId.get(t.accountId), cycleAware) === monthKey));
+}
+
+function tally(rows) {
   const totals = new Map();
-  for (const t of transactions) {
+  for (const t of rows) {
     if (t.isTransfer || t.direction !== 'debit') continue;
-    if (t.date < from || t.date > to) continue;
     for (const slice of categorySlices(t)) {
       const key = slice.categoryId || 'uncategorized';
       totals.set(key, (totals.get(key) || 0) + slice.amount);
@@ -36,9 +47,24 @@ export function spendByCategory(transactions, from, to = '9999-12-31') {
   return totals;
 }
 
+export async function cycleAwareEnabled() {
+  return (await getSetting(CYCLE_SETTING_KEY, true)) !== false;
+}
+
+// Budget progress for a spending month, which is what the rest of the app now
+// means by "this month".
+export async function budgetStatusForMonth(budgets, categories, transactions, monthKey) {
+  const accounts = await getAll('accounts');
+  const spentMap = spendByCategoryForMonth(transactions, accounts, monthKey, await cycleAwareEnabled());
+  return statusFrom(budgets, categories, spentMap);
+}
+
 // `state` drives the colour: fine under 80%, warn up to the limit, over past it.
 export function budgetStatus(budgets, categories, transactions, from = monthStartISO(), to = '9999-12-31') {
-  const spentMap = spendByCategory(transactions, from, to);
+  return statusFrom(budgets, categories, spendByCategory(transactions, from, to));
+}
+
+function statusFrom(budgets, categories, spentMap) {
   return Object.entries(budgets)
     .map(([categoryId, limit]) => {
       const spent = spentMap.get(categoryId) || 0;

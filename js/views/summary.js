@@ -5,7 +5,8 @@ import { detectRecurring, nextDueDate } from '../recurring.js';
 import { detectAnomalies } from '../anomalies.js';
 import { categoryStyle } from '../category-style.js';
 import { categorySlices, needsCategory } from '../splits.js';
-import { getBudgets, budgetStatus, monthStartISO } from '../budgets.js';
+import { getBudgets, budgetStatusForMonth, cycleAwareEnabled } from '../budgets.js';
+import { spendingMonthOf, accountMap, currentMonthKey, previousMonthKey, cycleExplanation } from '../spending-month.js';
 import { applyLearnedCategories } from '../merchant-rules.js';
 import { showToast } from '../toast.js';
 
@@ -112,7 +113,7 @@ async function renderAttention(container, transactions) {
 
   const [accounts, categories, budgets] = await Promise.all([getAll('accounts'), getAll('categories'), getBudgets()]);
   const uncategorized = transactions.filter((t) => needsCategory(t));
-  const monthStart = monthStartISO();
+  const monthStart = `${currentMonthKey()}-01`;
   const dismissed = new Set(await getSetting('dismissedAnomalies', []));
   const anomalies = (await detectAnomalies(monthStart)).filter((a) => !dismissed.has(a.transaction.id));
 
@@ -125,7 +126,7 @@ async function renderAttention(container, transactions) {
     .map((a) => ({ account: a, bill: cardBillDue(a) }))
     .filter((x) => x.bill && !x.bill.paid && x.bill.daysLeft != null && x.bill.daysLeft <= 5);
 
-  const budgetAlerts = budgetStatus(budgets, categories, transactions, monthStart).filter((b) => b.state !== 'ok');
+  const budgetAlerts = (await budgetStatusForMonth(budgets, categories, transactions, currentMonthKey())).filter((b) => b.state !== 'ok');
 
   if (uncategorized.length === 0 && anomalies.length === 0 && dueCards.length === 0 && budgetAlerts.length === 0) {
     el.innerHTML = `<h3>Needs your attention</h3><div class="totals-card"><p class="muted-note">Nothing to deal with right now.</p></div>`;
@@ -338,7 +339,18 @@ async function renderContent(container) {
   }
 
   const [transactions, categories, accounts] = await Promise.all([getAll('transactions'), getAll('categories'), getAll('accounts')]);
-  const inRange = transactions.filter((t) => t.date >= from && t.date <= to && !t.isTransfer);
+  const cycleAware = await cycleAwareEnabled();
+
+  // For "this month" and "last month" the unit is a spending month, so card
+  // purchases sit in the month they'll actually be billed in. A custom range
+  // stays literal - if you asked for two dates, you meant those two dates.
+  const monthKey = currentRange === 'this-month' ? currentMonthKey() : currentRange === 'last-month' ? previousMonthKey(currentMonthKey()) : null;
+  const byAccountId = accountMap(accounts);
+  const inRange = (
+    monthKey
+      ? transactions.filter((t) => spendingMonthOf(t, byAccountId.get(t.accountId), cycleAware) === monthKey)
+      : transactions.filter((t) => t.date >= from && t.date <= to)
+  ).filter((t) => !t.isTransfer);
 
   let totalIn = 0;
   let totalOut = 0;
@@ -360,7 +372,16 @@ async function renderContent(container) {
   const comparison = comparisonPeriod();
   if (comparison) {
     const prevOut = transactions
-      .filter((t) => t.date >= comparison.from && t.date <= comparison.to && !t.isTransfer && t.direction === 'debit')
+      .filter((t) => {
+        if (t.isTransfer || t.direction !== 'debit') return false;
+        // Compare against the same slice of the previous spending month, so a
+        // half-finished month isn't measured against a complete one.
+        if (monthKey) {
+          const m = spendingMonthOf(t, byAccountId.get(t.accountId), cycleAware);
+          return m === previousMonthKey(monthKey) && t.date <= comparison.to;
+        }
+        return t.date >= comparison.from && t.date <= comparison.to;
+      })
       .reduce((s, t) => s + t.amount, 0);
     if (prevOut > 0) {
       const pctChange = Math.round(((totalOut - prevOut) / prevOut) * 100);
@@ -370,6 +391,7 @@ async function renderContent(container) {
   }
 
   const catName = (id) => (id === 'uncategorized' ? 'Uncategorized' : categories.find((c) => c.id === id)?.name || 'Uncategorized');
+  const cycleNote = monthKey ? cycleExplanation(accounts, cycleAware) : null;
 
   content.innerHTML = `
     <div class="totals-card">
@@ -378,6 +400,7 @@ async function renderContent(container) {
       ${comparisonHtml}
       <div class="totals-row net"><span>Net</span><span>${formatSignedCurrency(totalIn - totalOut)}</span></div>
     </div>
+    ${cycleNote ? `<p class="muted-note cycle-note">${escapeHtml(cycleNote)}</p>` : ''}
     <button type="button" id="recap-link" class="btn-secondary btn-block">See your month in review →</button>
     <h3>Where it went</h3>
     <ul class="breakdown-list">${renderCategoryBreakdown(byCategory, catName, totalOut)}</ul>

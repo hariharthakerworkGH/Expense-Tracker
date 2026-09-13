@@ -4,13 +4,80 @@ import { formatDateNice } from '../format.js';
 import { remindersEnabled, reminderDaysBefore, permissionState, enableReminders, disableReminders, refreshSchedule } from '../reminders.js';
 import { setSetting } from '../db.js';
 import { showToast } from '../toast.js';
+import { getSyncConfig, saveSyncConfig, clearSyncConfig, syncNow, testToken, getSyncPassphrase, setSyncPassphrase } from '../sync.js';
+import { cycleAwareEnabled } from '../budgets.js';
+import { CYCLE_SETTING_KEY } from '../spending-month.js';
 
 export async function render(container) {
+  const sync = await getSyncConfig();
+  const syncPass = await getSyncPassphrase();
+  const cycleAware = await cycleAwareEnabled();
   const enabled = await remindersEnabled();
   const permission = permissionState();
   const daysBefore = await reminderDaysBefore();
 
   container.innerHTML = `
+    <h3>Sync across your devices</h3>
+    <p class="group-subtitle">Your data lives in this browser only. Sync keeps your phone and laptop in step through one secret GitHub Gist of your own — encrypted here first, so GitHub only ever stores ciphertext.</p>
+    <div class="totals-card">
+      ${
+        sync.configured
+          ? `<div class="attention-row">
+              <span>Connected${sync.login ? ` as ${escapeHtml(sync.login)}` : ''}<br><span class="muted-note" id="sync-last">${
+                sync.lastSync ? `Last synced ${timeAgo(sync.lastSync)}` : 'Not synced yet'
+              }</span></span>
+              <button type="button" class="btn-tiny primary" id="sync-now">Sync now</button>
+            </div>
+            <p id="sync-status" class="status" hidden></p>
+            ${
+              sync.gistId
+                ? `<p class="muted-note">Gist: <code>${escapeHtml(sync.gistId)}</code> — secret, but anyone with the link could fetch the file. It's useless without your passphrase.</p>`
+                : ''
+            }
+            <button type="button" class="btn-tiny danger" id="sync-disconnect">Disconnect sync</button>`
+          : `<ol class="setup-steps">
+              <li>Open <strong>github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens</strong>.</li>
+              <li>Click <strong>Generate new token</strong>. Give it any name and an expiry you're happy with.</li>
+              <li>Under <strong>Account permissions</strong>, set <strong>Gists</strong> to <strong>Read and write</strong>. Nothing else is needed.</li>
+              <li>Generate it, copy the token, and paste it below.</li>
+            </ol>
+            <label class="field">
+              <span>GitHub token</span>
+              <input type="password" id="sync-token" placeholder="github_pat_…" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Passphrase to encrypt with</span>
+              <input type="password" id="sync-pass" placeholder="Use the same one on every device" autocomplete="new-password">
+            </label>
+            <p class="muted-note">Use the <strong>same passphrase on every device</strong> — it's the only thing that can open the file, and there's no recovery if you forget it.</p>
+            <button type="button" class="btn-primary" id="sync-connect">Connect</button>
+            <p id="sync-connect-status" class="status" hidden></p>`
+      }
+    </div>
+    ${
+      sync.configured && !syncPass
+        ? `<div class="totals-card warn-card">
+            <label class="field">
+              <span>Passphrase needed on this device</span>
+              <input type="password" id="sync-pass-again" placeholder="The passphrase you set up sync with" autocomplete="off">
+            </label>
+            <button type="button" class="btn-secondary btn-block" id="sync-pass-save">Save and sync</button>
+          </div>`
+        : ''
+    }
+
+    <h3>How months are counted</h3>
+    <div class="totals-card">
+      <div class="attention-row">
+        <span>Count card spending by billing cycle<br><span class="muted-note">${
+          cycleAware
+            ? 'On — a card purchase after its statement day counts towards next month, matching when you actually get billed.'
+            : 'Off — everything is counted by calendar date, even if the bill lands next month.'
+        }</span></span>
+        <button type="button" class="btn-tiny ${cycleAware ? '' : 'primary'}" id="cycle-toggle">${cycleAware ? 'Turn off' : 'Turn on'}</button>
+      </div>
+    </div>
+
     <h3>Bill reminders</h3>
     <p class="group-subtitle">A notification before a card bill or fixed commitment is due. Everything is worked out on this phone - nothing is sent anywhere.</p>
     <div class="totals-card">
@@ -69,6 +136,14 @@ export async function render(container) {
     <p class="group-subtitle">Undo an import if you loaded the wrong file or imported the same statement twice.</p>
     <div id="import-history"></div>
   `;
+
+  wireSync(container);
+
+  container.querySelector('#cycle-toggle').addEventListener('click', async () => {
+    await setSetting(CYCLE_SETTING_KEY, !cycleAware);
+    showToast(cycleAware ? 'Counting by calendar date' : 'Counting by billing cycle');
+    render(container);
+  });
 
   const reminderToggle = container.querySelector('#reminder-toggle');
   if (reminderToggle) {
@@ -151,6 +226,89 @@ export async function render(container) {
   });
 
   await renderImportHistory(container);
+}
+
+function wireSync(container) {
+  const connectBtn = container.querySelector('#sync-connect');
+  if (connectBtn) {
+    connectBtn.addEventListener('click', async () => {
+      const token = container.querySelector('#sync-token').value.trim();
+      const passphrase = container.querySelector('#sync-pass').value;
+      const statusEl = container.querySelector('#sync-connect-status');
+      if (!token) return showStatus(statusEl, 'Paste your GitHub token first.', true);
+      if (passphrase.length < 8) return showStatus(statusEl, 'Use a passphrase of at least 8 characters.', true);
+
+      showStatus(statusEl, 'Checking the token…', false);
+      const check = await testToken(token);
+      if (!check.ok) return showStatus(statusEl, check.reason, true);
+
+      await saveSyncConfig({ token });
+      await setSyncPassphrase(passphrase);
+      try {
+        showStatus(statusEl, `Connected as ${check.login}. Syncing…`, false);
+        const result = await syncNow(passphrase, { onProgress: (m) => showStatus(statusEl, m, false) });
+        showToast(`Synced ${result.counts.transactions} transactions`);
+        render(container);
+      } catch (err) {
+        showStatus(statusEl, err.message, true);
+      }
+    });
+  }
+
+  const nowBtn = container.querySelector('#sync-now');
+  if (nowBtn) {
+    nowBtn.addEventListener('click', async () => {
+      const statusEl = container.querySelector('#sync-status');
+      const passphrase = await getSyncPassphrase();
+      if (!passphrase) return showStatus(statusEl, 'Enter your passphrase below first.', true);
+      nowBtn.disabled = true;
+      try {
+        const result = await syncNow(passphrase, { onProgress: (m) => showStatus(statusEl, m, false) });
+        const { added, updated, deleted } = result.pulled;
+        showStatus(
+          statusEl,
+          added || updated || deleted
+            ? `Brought in ${added} new, ${updated} updated, ${deleted} removed.`
+            : 'Already up to date.',
+          false
+        );
+        render(container);
+      } catch (err) {
+        showStatus(statusEl, err.message, true);
+      } finally {
+        nowBtn.disabled = false;
+      }
+    });
+  }
+
+  const passSave = container.querySelector('#sync-pass-save');
+  if (passSave) {
+    passSave.addEventListener('click', async () => {
+      const value = container.querySelector('#sync-pass-again').value;
+      if (value.length < 8) return;
+      await setSyncPassphrase(value);
+      render(container);
+    });
+  }
+
+  const disconnectBtn = container.querySelector('#sync-disconnect');
+  if (disconnectBtn) {
+    disconnectBtn.addEventListener('click', async () => {
+      if (!confirm('Stop syncing on this device?\n\nYour data stays here and the gist stays on GitHub — this only forgets the token and passphrase.')) return;
+      await clearSyncConfig();
+      await setSyncPassphrase(null);
+      render(container);
+    });
+  }
+}
+
+function timeAgo(ts) {
+  const mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  return `${Math.round(hours / 24)} day${Math.round(hours / 24) === 1 ? '' : 's'} ago`;
 }
 
 async function renderImportHistory(container) {

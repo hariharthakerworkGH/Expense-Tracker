@@ -3,6 +3,8 @@ import { formatCurrency } from '../format.js';
 import { categoryStyle } from '../category-style.js';
 import { extractMerchantKey } from '../merchant-rules.js';
 import { categorySlices } from '../splits.js';
+import { spendingMonthOf, accountMap } from '../spending-month.js';
+import { cycleAwareEnabled } from '../budgets.js';
 
 // A month's spending told as a handful of single-idea cards you step through,
 // instead of a wall of figures. Everything is computed on the device from
@@ -16,10 +18,20 @@ export async function render(container, params = {}) {
     monthOffset = 0;
     cardIndex = 0;
   }
-  const [transactions, categories] = await Promise.all([getAll('transactions'), getAll('categories')]);
-  const spendable = transactions.filter((t) => !t.isTransfer);
+  const [transactions, categories, accounts, cycleAware] = await Promise.all([
+    getAll('transactions'),
+    getAll('categories'),
+    getAll('accounts'),
+    cycleAwareEnabled(),
+  ]);
+  // Tag each transaction with the month it actually belongs to, so a card
+  // purchase after the statement day is recapped in the month it gets billed.
+  const byId = accountMap(accounts);
+  const spendable = transactions
+    .filter((t) => !t.isTransfer)
+    .map((t) => ({ ...t, month: spendingMonthOf(t, byId.get(t.accountId), cycleAware) }));
 
-  const months = [...new Set(spendable.map((t) => t.date.slice(0, 7)))].sort().reverse();
+  const months = [...new Set(spendable.map((t) => t.month))].sort().reverse();
   if (months.length === 0) {
     container.innerHTML = '<p class="empty">Nothing to recap yet. Import a statement or add a few expenses first.</p>';
     return;
@@ -82,7 +94,7 @@ export async function render(container, params = {}) {
 }
 
 function buildCards(transactions, categories, month, prevMonth) {
-  const inMonth = transactions.filter((t) => t.date.startsWith(month));
+  const inMonth = transactions.filter((t) => t.month === month);
   const debits = inMonth.filter((t) => t.direction === 'debit');
   const credits = inMonth.filter((t) => t.direction === 'credit');
   const spent = debits.reduce((s, t) => s + t.amount, 0);
@@ -96,7 +108,7 @@ function buildCards(transactions, categories, month, prevMonth) {
 
   let comparison = '';
   if (prevMonth) {
-    const prevAll = transactions.filter((t) => t.date.startsWith(prevMonth) && t.direction === 'debit');
+    const prevAll = transactions.filter((t) => t.month === prevMonth && t.direction === 'debit');
     // A month still in progress must be compared against the same stretch of
     // the previous one - thirteen days against a full month always looks like
     // a triumph. And a month you only hold the tail of (an old statement's

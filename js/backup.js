@@ -17,26 +17,55 @@ export async function exportEncrypted(passphrase) {
     data[store] = await getAll(store);
   }
 
-  const plaintext = new TextEncoder().encode(JSON.stringify(data));
+  return {
+    envelope: JSON.parse(await encryptPayload(data, passphrase)),
+    counts: Object.fromEntries(STORES.map((s) => [s, data[s].length])),
+  };
+}
+
+// The encryption on its own, so sync can reuse exactly the same envelope
+// format as a downloaded backup file - one thing to get right, not two.
+// Returns the envelope as a JSON string, ready to be a file or a gist.
+export async function encryptPayload(payload, passphrase) {
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveKey(passphrase, salt);
   const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
 
-  return {
-    envelope: {
-      format: FORMAT,
-      formatVersion: FORMAT_VERSION,
-      createdAt: new Date().toISOString(),
-      kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: PBKDF2_ITERATIONS, salt: toBase64(salt) },
-      iv: toBase64(iv),
-      data: toBase64(new Uint8Array(cipher)),
-    },
-    counts: Object.fromEntries(STORES.map((s) => [s, data[s].length])),
-  };
+  return JSON.stringify({
+    format: FORMAT,
+    formatVersion: FORMAT_VERSION,
+    createdAt: new Date().toISOString(),
+    kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: PBKDF2_ITERATIONS, salt: toBase64(salt) },
+    iv: toBase64(iv),
+    data: toBase64(new Uint8Array(cipher)),
+  });
+}
+
+export async function decryptPayload(envelopeText, passphrase) {
+  return parseEnvelope(envelopeText, passphrase);
 }
 
 export async function decryptBackup(fileText, passphrase) {
+  const { payload, createdAt } = await parseEnvelopeRaw(fileText, passphrase);
+  // A backup file holds the stores directly; a synced payload wraps them in
+  // `data` alongside its tombstones. Accept either, so a gist payload saved to
+  // disk can still be restored.
+  const data = payload.data && payload.deletions ? payload.data : payload;
+  return {
+    data,
+    createdAt,
+    counts: Object.fromEntries(STORES.map((s) => [s, (data[s] || []).length])),
+  };
+}
+
+async function parseEnvelope(envelopeText, passphrase) {
+  const { payload } = await parseEnvelopeRaw(envelopeText, passphrase);
+  return payload;
+}
+
+async function parseEnvelopeRaw(fileText, passphrase) {
   let envelope;
   try {
     envelope = JSON.parse(fileText);
@@ -63,12 +92,7 @@ export async function decryptBackup(fileText, passphrase) {
     throw new Error('Could not decrypt - wrong passphrase, or the file is damaged.');
   }
 
-  const data = JSON.parse(new TextDecoder().decode(plaintext));
-  return {
-    data,
-    createdAt: envelope.createdAt,
-    counts: Object.fromEntries(STORES.map((s) => [s, (data[s] || []).length])),
-  };
+  return { payload: JSON.parse(new TextDecoder().decode(plaintext)), createdAt: envelope.createdAt };
 }
 
 // Replaces everything. The caller is responsible for confirming with the user
@@ -76,10 +100,16 @@ export async function decryptBackup(fileText, passphrase) {
 export async function restoreBackup(data) {
   for (const store of STORES) {
     const existing = await getAll(store);
+    const incoming = new Set((data[store] || []).map((r) => r.id));
     for (const record of existing) {
-      await remove(store, record.id);
+      // Clearing a record that the backup is about to put straight back must
+      // not leave a tombstone behind - on the next sync that tombstone could
+      // out-rank the restored record and delete it again on every device.
+      await remove(store, record.id, { tombstone: !incoming.has(record.id) });
     }
     for (const record of data[store] || []) {
+      // Stamped as of now: restoring is you asserting that this is the truth,
+      // so it should win against whatever the other device is holding.
       await put(store, record);
     }
   }
