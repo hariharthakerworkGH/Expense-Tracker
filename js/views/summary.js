@@ -7,6 +7,8 @@ import { categoryStyle } from '../category-style.js';
 import { categorySlices, needsCategory } from '../splits.js';
 import { getBudgets, budgetStatusForMonth, cycleAwareEnabled } from '../budgets.js';
 import { spendingMonthOf, accountMap, currentMonthKey, previousMonthKey, cycleExplanation } from '../spending-month.js';
+import { APP_VERSION, versionStatus, checkForUpdate } from '../version.js';
+import { getSyncConfig } from '../sync.js';
 import { applyLearnedCategories } from '../merchant-rules.js';
 import { showToast } from '../toast.js';
 
@@ -407,11 +409,62 @@ async function renderContent(container) {
     <h3>Which account paid</h3>
     <p class="group-subtitle">Every account you've added. Ones you didn't touch in this period say so, rather than quietly vanishing.</p>
     <ul class="breakdown-list">${renderAccountBreakdown(byAccount, accounts, transactions)}</ul>
+    <div class="version-line" id="version-line">
+      <span id="version-text">Version ${APP_VERSION}</span>
+      <button type="button" class="icon-btn" id="version-check">Check for update</button>
+    </div>
   `;
 
   content.querySelector('#recap-link').addEventListener('click', () => {
     container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'recap' } }));
   });
+
+  renderVersionLine(content);
+}
+
+// Answers two questions at a glance: am I running the current code, and is my
+// data current. Both have caused confusion, and both are cheap to state.
+async function renderVersionLine(content) {
+  const textEl = content.querySelector('#version-text');
+  const btn = content.querySelector('#version-check');
+  if (!textEl || !btn) return;
+
+  const paint = async (status) => {
+    const bits = [`Version ${status.running}`];
+    // With no cached copy to compare against there is nothing to be stale
+    // against either, so claim nothing rather than a reassuring "up to date".
+    if (status.stale) bits.push(`version ${status.cached} ready — reopen the app`);
+    else if (status.cached != null) bits.push('up to date');
+
+    const { configured, lastSync } = await getSyncConfig();
+    if (!configured) bits.push('sync off');
+    else if (lastSync) bits.push(`synced ${relativeTime(lastSync)}`);
+    else bits.push('not synced yet');
+
+    textEl.textContent = bits.join(' · ');
+    textEl.classList.toggle('stale', status.stale);
+  };
+
+  await paint(await versionStatus());
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    const status = await checkForUpdate();
+    await paint(status);
+    btn.disabled = false;
+    btn.textContent = status.stale ? 'Reload' : 'Check for update';
+    if (status.stale) btn.onclick = () => window.location.reload();
+  });
+}
+
+function relativeTime(ts) {
+  const mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
 }
 
 function addToBucket(map, key, direction, amount) {

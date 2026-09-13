@@ -1553,6 +1553,57 @@ h3 {
   margin-left: 2px;
 }
 
+/* ---------- Version / update ---------- */
+
+.update-banner {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 16px 12px;
+  padding: 12px 14px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: var(--radius-md);
+  font-size: 0.86rem;
+  font-weight: 600;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.update-banner button {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  padding: 7px 15px;
+  background: var(--accent-ink);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.version-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 26px 4px 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 0.74rem;
+  color: var(--text-dim);
+}
+
+.version-line .stale {
+  color: var(--warn);
+  font-weight: 700;
+}
+
 /* ---------- Toast ---------- */
 
 .toast {

@@ -3,6 +3,7 @@ import { getSyncConfig, getSyncPassphrase, syncNow } from './sync.js';
 import { CASH_ACCOUNT_ID } from './config.js';
 import { detectTransfers } from './transfers.js';
 import { showToast } from './toast.js';
+import { versionStatus } from './version.js';
 import * as addView from './views/add.js';
 import * as categoriesView from './views/categories.js';
 import * as summaryView from './views/summary.js';
@@ -157,6 +158,41 @@ function wireSync() {
   });
 }
 
+// Tells you, rather than leaving you to wonder, when the copy you are looking
+// at has been superseded by one already downloaded in the background.
+async function showUpdateBannerIfStale() {
+  const status = await versionStatus();
+  if (!status.stale) return;
+  const banner = document.getElementById('update-banner');
+  const text = document.getElementById('update-banner-text');
+  if (!banner || !text) return;
+  text.textContent = `Version ${status.cached} is ready — you're still seeing version ${status.running}.`;
+  banner.hidden = false;
+}
+
+function wireUpdateBanner() {
+  const banner = document.getElementById('update-banner');
+  const btn = document.getElementById('update-banner-btn');
+  if (btn) btn.addEventListener('click', () => window.location.reload());
+
+  showUpdateBannerIfStale();
+
+  if ('serviceWorker' in navigator) {
+    // A new worker taking over mid-session means newer files are now cached.
+    // Only meaningful if something was already controlling this page - on a
+    // first-ever install there is no older version to be stale against.
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController) showUpdateBannerIfStale();
+    });
+  }
+
+  // Returning to the app is a natural moment to have picked up a new version.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') showUpdateBannerIfStale();
+  });
+}
+
 // The nav's real height depends on the device's font scaling and safe-area
 // inset, so measure it instead of guessing - otherwise it sits on top of the
 // last rows of content.
@@ -207,6 +243,7 @@ async function init() {
     .catch(() => {});
 
   wireSync();
+  wireUpdateBanner();
 }
 
 init();
