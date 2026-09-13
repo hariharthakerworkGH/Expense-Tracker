@@ -329,6 +329,37 @@ select {
   font-weight: 400;
 }
 
+.attention-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.upcoming-row {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+}
+
+.upcoming-row .attention-row {
+  border-bottom: none;
+  padding-bottom: 4px;
+}
+
+.upcoming-row:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.totals-card .attention-row:last-child {
+  border-bottom: none;
+}
+
 h3 {
   font-size: 0.8rem;
   color: var(--text-muted);

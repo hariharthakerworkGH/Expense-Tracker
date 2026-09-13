@@ -50,6 +50,9 @@ async function showView(name, params = {}) {
   container.innerHTML = '';
   await view.module.render(container, params);
   history.replaceState(null, '', `#${name}`);
+  // Switching tabs must land at the top - otherwise a screen you'd scrolled
+  // down on leaves the NEXT screen opening mid-scroll, looking stuck/broken.
+  window.scrollTo(0, 0);
 }
 
 async function init() {

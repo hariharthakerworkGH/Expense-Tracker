@@ -1,24 +1,60 @@
 import { getAll, put, newId } from './db.js';
 
-// Crude but effective: strip UPI/value-date/ref noise, keep the merchant
-// fragment before the first separator, use it as a case-insensitive key.
-export function extractMerchantKey(rawDescription) {
-  return rawDescription
-    .replace(/UPI-/gi, '')
+// Words that show up constantly in narrations but never identify a merchant
+// (payment-gateway prefixes, corporate suffixes, generic connectors).
+const STOPWORDS = new Set([
+  'pay', 'ptm', 'rsp', 'bppy', 'upi', 'value', 'dt', 'ref', 'pvt', 'ltd',
+  'private', 'limited', 'com', 'www', 'the', 'and', 'for', 'from', 'india',
+  'llc', 'llp', 'inc', 'services', 'service', 'payment', 'transaction',
+]);
+
+// The same merchant often shows up under different payment-gateway prefixes
+// across statements ("PAY*SWIGGY...", "PTM*SWIGGY...", "RSP*SWIGGY...") or
+// with the city glued onto the end with no space ("SwiggyBENGALURU"). Exact
+// or single-key matching misses all of that, so instead of one key we keep
+// a handful of "significant" words per description and match on overlap.
+export function significantTokens(rawDescription) {
+  const cleaned = rawDescription
     .replace(/Value Dt.*$/i, '')
-    .replace(/Ref\s*\d+.*$/i, '')
-    .split(/[-|]/)[0]
-    .trim()
-    .toLowerCase()
-    .slice(0, 40);
+    .replace(/\(?Ref#?\s*\d+.*$/i, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+  if (!cleaned) return [];
+  return cleaned
+    .split(' ')
+    .filter((w) => w.length >= 4 && !STOPWORDS.has(w.toLowerCase()))
+    .map((w) => w.toLowerCase());
+}
+
+export function extractMerchantKey(rawDescription) {
+  return significantTokens(rawDescription).slice(0, 4).join(' ');
 }
 
 export async function matchCategoryForDescription(rawDescription) {
-  const key = extractMerchantKey(rawDescription);
-  if (!key) return null;
+  const tokens = new Set(significantTokens(rawDescription));
+  if (tokens.size === 0) return null;
+
   const rules = await getAll('merchantRules');
-  const hit = rules.find((r) => key.includes(r.matchPattern) || r.matchPattern.includes(key));
-  return hit ? hit.categoryId : null;
+  let best = null;
+  let bestScore = 0;
+
+  for (const rule of rules) {
+    const ruleTokens = rule.matchPattern.split(' ').filter(Boolean);
+    let score = 0;
+    for (const t of tokens) {
+      for (const rt of ruleTokens) {
+        if (t === rt) score += 2;
+        else if (t.length >= 4 && rt.length >= 4 && (t.includes(rt) || rt.includes(t))) score += 1;
+      }
+    }
+    if (score > bestScore || (score === bestScore && score > 0 && rule.hitCount > (best?.hitCount || 0))) {
+      bestScore = score;
+      best = rule;
+    }
+  }
+
+  return bestScore > 0 ? best.categoryId : null;
 }
 
 export async function learnFromAssignment(rawDescription, categoryId) {

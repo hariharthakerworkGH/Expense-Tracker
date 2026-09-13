@@ -17,3 +17,14 @@ export function formatSignedCurrency(minorUnits) {
   const sign = minorUnits < 0 ? '-' : '';
   return `${sign}${CURRENCY_SYMBOL}${formatAmount(Math.abs(minorUnits))}`;
 }
+
+export function formatDateNice(isoDate) {
+  const d = new Date(isoDate);
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+export function ordinal(n) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}

@@ -1,6 +1,6 @@
 import { getAll, put, newId } from '../db.js';
-import { formatCurrency } from '../format.js';
-import { currentCycleStart } from '../billing-cycle.js';
+import { formatCurrency, formatDateNice, ordinal } from '../format.js';
+import { bankBalance, cardCycleSpend } from '../account-metrics.js';
 
 export async function render(container) {
   const [accounts, transactions, importBatches] = await Promise.all([getAll('accounts'), getAll('transactions'), getAll('importBatches')]);
@@ -83,10 +83,7 @@ function accountCard(account, transactions, importBatches) {
   const acctTxns = transactions.filter((t) => t.accountId === account.id);
 
   if (account.type === 'card') {
-    const cycleStart = currentCycleStart(account, importBatches);
-    const cycleSpend = acctTxns
-      .filter((t) => t.direction === 'debit' && !t.isTransfer && (!cycleStart || t.date > cycleStart))
-      .reduce((s, t) => s + t.amount, 0);
+    const { cycleStart, spend: cycleSpend } = cardCycleSpend(account, transactions, importBatches);
 
     return `
       <div class="totals-card account-card">
@@ -142,27 +139,6 @@ function accountCard(account, transactions, importBatches) {
       </div>
     </div>
   `;
-}
-
-function bankBalance(account, acctTxns) {
-  if (account.knownBalance == null || !account.knownBalanceDate) return null;
-  let balance = account.knownBalance;
-  for (const t of acctTxns) {
-    if (t.date <= account.knownBalanceDate) continue;
-    balance += t.direction === 'credit' ? t.amount : -t.amount;
-  }
-  return balance;
-}
-
-function ordinal(n) {
-  const s = ['th', 'st', 'nd', 'rd'];
-  const v = n % 100;
-  return n + (s[(v - 20) % 10] || s[v] || s[0]);
-}
-
-function formatDateNice(isoDate) {
-  const d = new Date(isoDate);
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 function escapeHtml(str) {
