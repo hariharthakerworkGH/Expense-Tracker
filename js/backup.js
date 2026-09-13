@@ -1,6 +1,8 @@
 import { getAll, put, remove } from './db.js';
 
-const STORES = ['accounts', 'transactions', 'categories', 'merchantRules', 'recurring', 'importBatches'];
+// `settings` carries your income, budgets and reminder preferences - a restore
+// that dropped them would look like the app had forgotten how you set it up.
+const STORES = ['accounts', 'transactions', 'categories', 'merchantRules', 'recurring', 'importBatches', 'settings'];
 const FORMAT = 'expense-tracker-backup';
 const FORMAT_VERSION = 1;
 const PBKDF2_ITERATIONS = 210000;

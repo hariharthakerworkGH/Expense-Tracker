@@ -1,5 +1,7 @@
 import { put, getAll, newId } from '../db.js';
 import { CASH_ACCOUNT_ID } from '../config.js';
+import { categoryStyle } from '../category-style.js';
+import { showToast } from '../toast.js';
 
 export async function render(container, params = {}) {
   const [categories, accounts] = await Promise.all([getAll('categories'), getAll('accounts')]);
@@ -8,9 +10,12 @@ export async function render(container, params = {}) {
 
   container.innerHTML = `
     <form id="add-form" class="add-form">
-      <label class="field">
+      <label class="field amount-field">
         <span>Amount</span>
-        <input id="add-amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0.00" required>
+        <div class="amount-input-wrap">
+          <span class="amount-prefix">₹</span>
+          <input id="add-amount" class="amount-input" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0" required>
+        </div>
       </label>
       <div class="direction-toggle">
         <button type="button" class="dir-btn active" data-dir="debit">Spent</button>
@@ -22,7 +27,7 @@ export async function render(container, params = {}) {
       </label>
       <div class="chip-row" id="add-categories">
         <button type="button" class="chip active" data-cat="">Uncategorized</button>
-        ${categories.map((c) => `<button type="button" class="chip" data-cat="${c.id}">${escapeHtml(c.name)}</button>`).join('')}
+        ${categories.map((c) => `<button type="button" class="chip" data-cat="${c.id}">${categoryStyle(c.name).icon} ${escapeHtml(c.name)}</button>`).join('')}
       </div>
       <label class="field">
         <span>Account</span>
@@ -35,7 +40,6 @@ export async function render(container, params = {}) {
         <input id="add-date" type="date" value="${today}">
       </label>
       <button type="submit" class="btn-primary">Save</button>
-      <p id="add-status" class="status" hidden></p>
     </form>
   `;
 
@@ -81,9 +85,7 @@ export async function render(container, params = {}) {
     };
     await put('transactions', transaction);
 
-    const status = container.querySelector('#add-status');
-    status.hidden = false;
-    status.textContent = 'Saved.';
+    showToast(`Saved ${direction === 'debit' ? '-' : '+'}₹${(amount / 100).toLocaleString('en-IN')}`);
 
     form.reset();
     direction = 'debit';
@@ -93,9 +95,6 @@ export async function render(container, params = {}) {
     dateInput.value = today;
     accountSelect.value = initialAccountId;
     amountInput.focus();
-    setTimeout(() => {
-      status.hidden = true;
-    }, 1500);
   });
 
   amountInput.focus();

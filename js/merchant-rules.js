@@ -32,10 +32,15 @@ export function extractMerchantKey(rawDescription) {
 }
 
 export async function matchCategoryForDescription(rawDescription) {
+  return matchWithRules(rawDescription, await getAll('merchantRules'));
+}
+
+// Takes the rules as an argument so a bulk pass over hundreds of transactions
+// reads the rule table once instead of once per transaction.
+function matchWithRules(rawDescription, rules) {
   const tokens = new Set(significantTokens(rawDescription));
   if (tokens.size === 0) return null;
 
-  const rules = await getAll('merchantRules');
   let best = null;
   let bestScore = 0;
 
@@ -55,6 +60,27 @@ export async function matchCategoryForDescription(rawDescription) {
   }
 
   return bestScore > 0 ? best.categoryId : null;
+}
+
+// Applies everything learned so far to transactions that still have no
+// category - typically statements imported before you'd taught the app
+// anything. Only ever fills a blank: a category set by hand, or a split, is
+// never touched. Pass `dryRun` to count what it would do without doing it.
+export async function applyLearnedCategories({ dryRun = false } = {}) {
+  const [transactions, rules] = await Promise.all([getAll('transactions'), getAll('merchantRules')]);
+  if (rules.length === 0) return 0;
+
+  let changed = 0;
+  for (const t of transactions) {
+    if (t.categoryId || t.isTransfer || (Array.isArray(t.splits) && t.splits.length)) continue;
+    const categoryId = matchWithRules(t.rawDescription, rules);
+    if (!categoryId) continue;
+    changed++;
+    if (dryRun) continue;
+    t.categoryId = categoryId;
+    await put('transactions', t);
+  }
+  return changed;
 }
 
 export async function learnFromAssignment(rawDescription, categoryId) {

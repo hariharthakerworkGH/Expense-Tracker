@@ -1,8 +1,11 @@
 import { getAll, put, remove, newId, getSetting, setSetting } from '../db.js';
 import { formatCurrency, formatSignedCurrency, ordinal } from '../format.js';
 import { detectRecurring } from '../recurring.js';
+import { categoryStyle } from '../category-style.js';
+import { getBudgets, setBudget, budgetStatus, spendByCategory, monthStartISO } from '../budgets.js';
 
 let adding = false;
+let addingBudget = false;
 
 // Fixed commitments live in the `recurring` store alongside auto-detected
 // bills; `source` tells them apart so detection never clobbers what you
@@ -10,11 +13,12 @@ let adding = false;
 const isFixed = (r) => r.source === 'fixed';
 
 export async function render(container) {
-  const [categories, recurring, transactions, income] = await Promise.all([
+  const [categories, recurring, transactions, income, budgets] = await Promise.all([
     getAll('categories'),
     getAll('recurring'),
     getAll('transactions'),
     getSetting('monthlyIncome', null),
+    getBudgets(),
   ]);
 
   const fixed = recurring.filter((r) => isFixed(r) && r.active !== false);
@@ -22,11 +26,15 @@ export async function render(container) {
   const fixedCategoryIds = new Set(fixed.map((r) => r.categoryId).filter(Boolean));
 
   const now = new Date();
-  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-  const thisMonth = transactions.filter((t) => t.date >= monthStart && !t.isTransfer);
-  const variableSpent = thisMonth
-    .filter((t) => t.direction === 'debit' && !fixedCategoryIds.has(t.categoryId))
-    .reduce((s, t) => s + t.amount, 0);
+  const monthStart = monthStartISO(now);
+  // Spending on a category that a fixed commitment already covers would be
+  // counted twice - once in the commitment, once here.
+  const spentMap = spendByCategory(transactions, monthStart);
+  let variableSpent = 0;
+  for (const [categoryId, amount] of spentMap) {
+    if (fixedCategoryIds.has(categoryId)) continue;
+    variableSpent += amount;
+  }
 
   const suggestedIncome = suggestIncome(transactions, categories);
   const incomeValue = income != null ? income : suggestedIncome;
@@ -36,6 +44,7 @@ export async function render(container) {
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const daysLeft = Math.max(1, daysInMonth - now.getDate() + 1);
   const perDay = left != null ? Math.floor(left / daysLeft) : null;
+  const usedPct = disposable > 0 ? Math.min(100, Math.round((variableSpent / disposable) * 100)) : 0;
 
   // Hide suggestions already covered by something fixed. Category match only
   // counts when both actually have one - otherwise a single uncategorised fixed
@@ -49,9 +58,30 @@ export async function render(container) {
       )
   );
 
-  container.innerHTML = `
-    <p class="import-intro">Set what you earn and what's already committed each month, and this tells you what's genuinely free to spend.</p>
+  const budgetRows = budgetStatus(budgets, categories, transactions, monthStart);
+  const budgetable = categories.filter((c) => !budgets[c.id] && !/income|transfer/i.test(c.name));
 
+  container.innerHTML = `
+    ${
+      left != null
+        ? `<div class="hero">
+            <p class="hero-label">Left to spend</p>
+            <p class="hero-amount ${left < 0 ? 'negative' : ''}">${formatSignedCurrency(left)}</p>
+            <div class="hero-meter"><div class="hero-meter-fill ${left < 0 ? 'over' : ''}" style="width:${usedPct}%"></div></div>
+            <p class="hero-sub">${
+              left < 0
+                ? `Over by ${formatCurrency(Math.abs(left))} with ${daysLeft} day${daysLeft === 1 ? '' : 's'} to go.`
+                : `About ${formatCurrency(perDay)} a day for the remaining ${daysLeft} day${daysLeft === 1 ? '' : 's'}.`
+            }</p>
+            <div class="hero-split">
+              <div class="hero-stat"><span class="stat-label">Free each month</span><span class="stat-value">${formatCurrency(disposable)}</span></div>
+              <div class="hero-stat"><span class="stat-label">Spent so far</span><span class="stat-value out">${formatCurrency(variableSpent)}</span></div>
+            </div>
+          </div>`
+        : `<p class="import-intro">Put in what you earn and what's already committed each month, and this works out what's genuinely free to spend.</p>`
+    }
+
+    <h3>Income and commitments</h3>
     <div class="totals-card">
       <label class="field">
         <span>Monthly income</span>
@@ -67,20 +97,21 @@ export async function render(container) {
       <div class="totals-row net"><span>Free each month</span><span>${disposable != null ? formatSignedCurrency(disposable) : '—'}</span></div>
     </div>
 
-    ${
-      left != null
-        ? `<div class="totals-card">
-            <div class="totals-row"><span>Spent so far this month<br><span class="muted-note">not counting fixed commitments</span></span><span class="out">-${formatCurrency(variableSpent)}</span></div>
-            <div class="totals-row net"><span>Left to spend</span><span class="${left < 0 ? 'out' : 'in'}">${formatSignedCurrency(left)}</span></div>
-            <div class="muted-note">${left < 0 ? `You're over by ${formatCurrency(Math.abs(left))} with ${daysLeft} day${daysLeft === 1 ? '' : 's'} to go.` : `About ${formatCurrency(perDay)} a day for the remaining ${daysLeft} day${daysLeft === 1 ? '' : 's'}.`}</div>
-          </div>`
-        : ''
-    }
-
     <h3>Fixed monthly commitments</h3>
     <p class="group-subtitle">Rent, EMIs, subscriptions - anything you owe every month regardless of how careful you are.</p>
     ${fixed.length ? `<div class="totals-card">${fixed.map((f) => fixedRow(f, categories)).join('')}</div>` : '<p class="empty">Nothing added yet.</p>'}
     ${adding ? fixedForm(categories) : '<button type="button" id="plan-add-btn" class="btn-secondary btn-block">Add a fixed expense</button>'}
+
+    <h3>Budgets</h3>
+    <p class="group-subtitle">A monthly ceiling for the categories you want to keep an eye on. You'll get a nudge on the Summary before you blow through one.</p>
+    ${budgetRows.length ? budgetRows.map((b) => budgetCard(b)).join('') : '<p class="empty">No budgets set.</p>'}
+    ${
+      addingBudget
+        ? budgetForm(budgetable)
+        : budgetable.length
+          ? '<button type="button" id="budget-add-btn" class="btn-secondary btn-block">Set a budget</button>'
+          : ''
+    }
 
     ${
       detected.length
@@ -142,6 +173,38 @@ export async function render(container) {
     });
   }
 
+  const budgetAddBtn = container.querySelector('#budget-add-btn');
+  if (budgetAddBtn) {
+    budgetAddBtn.addEventListener('click', () => {
+      addingBudget = true;
+      render(container);
+    });
+  }
+
+  const budgetFormEl = container.querySelector('#budget-form');
+  if (budgetFormEl) {
+    budgetFormEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const categoryId = budgetFormEl.querySelector('.bf-category').value;
+      const amount = Math.round(parseFloat(budgetFormEl.querySelector('.bf-amount').value) * 100);
+      if (!categoryId || !Number.isFinite(amount) || amount <= 0) return;
+      await setBudget(categoryId, amount);
+      addingBudget = false;
+      render(container);
+    });
+    budgetFormEl.querySelector('.bf-cancel').addEventListener('click', () => {
+      addingBudget = false;
+      render(container);
+    });
+  }
+
+  container.querySelectorAll('.budget-remove').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await setBudget(btn.dataset.id, null);
+      render(container);
+    });
+  });
+
   container.querySelectorAll('.fixed-delete').forEach((btn) => {
     btn.addEventListener('click', async () => {
       await remove('recurring', btn.dataset.id);
@@ -167,11 +230,56 @@ export async function render(container) {
   });
 }
 
+function budgetCard(b) {
+  const { icon, color } = categoryStyle(b.name);
+  const width = Math.min(100, Math.round(b.pct * 100));
+  return `
+    <div class="budget-card" style="--chip-color:${color}">
+      <div class="budget-head">
+        <span class="budget-name"><span class="cat-chip" style="--chip-color:${color}">${icon}</span>${escapeHtml(b.name)}</span>
+        <span class="budget-nums">${formatCurrency(b.spent)} <span class="muted">/ ${formatCurrency(b.limit)}</span></span>
+      </div>
+      <div class="budget-meter"><div class="budget-fill ${b.state === 'ok' ? '' : b.state}" style="width:${width}%"></div></div>
+      <div class="budget-head">
+        <span class="budget-note">${
+          b.state === 'over'
+            ? `Over by ${formatCurrency(-b.left)}`
+            : `${formatCurrency(b.left)} left this month`
+        }</span>
+        <button type="button" class="icon-btn budget-remove" data-id="${b.categoryId}">Remove</button>
+      </div>
+    </div>
+  `;
+}
+
+function budgetForm(categories) {
+  return `
+    <form class="totals-card" id="budget-form">
+      <label class="field">
+        <span>Category</span>
+        <select class="bf-category" required>
+          ${categories.map((c) => `<option value="${c.id}">${categoryStyle(c.name).icon} ${escapeHtml(c.name)}</option>`).join('')}
+        </select>
+      </label>
+      <label class="field">
+        <span>Monthly limit</span>
+        <input type="number" class="bf-amount" inputmode="decimal" step="0.01" min="0.01" placeholder="8000" required>
+      </label>
+      <button type="submit" class="btn-primary">Set budget</button>
+      <button type="button" class="btn-tiny bf-cancel btn-block" style="margin-top:10px">Cancel</button>
+    </form>
+  `;
+}
+
 function fixedRow(f, categories) {
   const cat = categories.find((c) => c.id === f.categoryId);
+  const { icon, color } = categoryStyle(cat?.name || f.label);
   return `
     <div class="attention-row">
-      <span>${escapeHtml(f.label)}<br><span class="muted-note">${cat ? escapeHtml(cat.name) + ' · ' : ''}due around the ${ordinal(f.dayOfMonth)}</span></span>
+      <span class="breakdown-label">
+        <span class="cat-chip" style="--chip-color:${color}">${icon}</span>
+        <span>${escapeHtml(f.label)}<br><span class="muted-note">${cat ? escapeHtml(cat.name) + ' · ' : ''}due around the ${ordinal(f.dayOfMonth)}</span></span>
+      </span>
       <span class="fixed-row-right">
         <span class="out">${formatCurrency(f.amount)}</span>
         <button type="button" class="icon-btn fixed-delete" data-id="${f.id}" aria-label="Remove">✕</button>
@@ -199,11 +307,11 @@ function fixedForm(categories) {
         <span>Category <span class="muted">(so this spend isn't counted twice)</span></span>
         <select class="ff-category">
           <option value="">None</option>
-          ${categories.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}
+          ${categories.map((c) => `<option value="${c.id}">${categoryStyle(c.name).icon} ${escapeHtml(c.name)}</option>`).join('')}
         </select>
       </label>
       <button type="submit" class="btn-primary">Add</button>
-      <button type="button" class="btn-tiny ff-cancel btn-block">Cancel</button>
+      <button type="button" class="btn-tiny ff-cancel btn-block" style="margin-top:10px">Cancel</button>
     </form>
   `;
 }

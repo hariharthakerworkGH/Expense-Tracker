@@ -1,4 +1,5 @@
 import { getAll, put, remove, newId } from '../db.js';
+import { categoryChip } from '../category-style.js';
 
 export async function render(container) {
   const categories = await getAll('categories');
@@ -76,7 +77,7 @@ function renderCatRow(cat, children) {
   return `
     <li class="cat-row">
       <div class="cat-row-main">
-        <span class="cat-name">${escapeHtml(cat.name)}</span>
+        <span class="cat-name">${categoryChip(cat.name)}${escapeHtml(cat.name)}</span>
         <span class="cat-actions">
           <button type="button" class="icon-btn cat-rename" data-id="${cat.id}">Rename</button>
           <button type="button" class="icon-btn cat-delete" data-id="${cat.id}">Delete</button>

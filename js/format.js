@@ -1,11 +1,11 @@
-import { CURRENCY_SYMBOL } from './config.js';
+﻿import { CURRENCY_SYMBOL } from './config.js';
 
 // en-IN groups digits the Indian way (lakh/crore: 12,34,567.89) instead of
 // the Western 1,234,567.89 - without this, large amounts are hard to read
 // at a glance.
 const nf = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export function formatAmount(minorUnits) {
+function formatAmount(minorUnits) {
   return nf.format(minorUnits / 100);
 }
 

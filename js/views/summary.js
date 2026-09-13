@@ -3,6 +3,11 @@ import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.
 import { bankBalance, cardCycleSpend, cardBillDue } from '../account-metrics.js';
 import { detectRecurring, nextDueDate } from '../recurring.js';
 import { detectAnomalies } from '../anomalies.js';
+import { categoryStyle } from '../category-style.js';
+import { categorySlices, needsCategory } from '../splits.js';
+import { getBudgets, budgetStatus, monthStartISO } from '../budgets.js';
+import { applyLearnedCategories } from '../merchant-rules.js';
+import { showToast } from '../toast.js';
 
 let currentRange = 'this-month';
 
@@ -42,7 +47,11 @@ async function renderDashboard(container) {
   const dashboardEl = container.querySelector('#dashboard');
   const [accounts, transactions, importBatches] = await Promise.all([getAll('accounts'), getAll('transactions'), getAll('importBatches')]);
 
-  dashboardEl.innerHTML = [renderNetPosition(accounts, transactions, importBatches), '<div id="attention-section"></div>', '<div id="upcoming-section"></div>'].join('');
+  dashboardEl.innerHTML = [
+    renderNetPosition(accounts, transactions, importBatches),
+    '<div id="attention-section"></div>',
+    '<div id="upcoming-section"></div>',
+  ].join('');
 
   await renderAttention(container, transactions);
   await renderUpcoming(container);
@@ -60,9 +69,7 @@ function renderNetPosition(accounts, transactions, importBatches) {
   const billsDue = bills.reduce((s, b) => s + b.amount, 0);
   const unbilled = cardAccounts.reduce((s, a) => s + cardCycleSpend(a, transactions, importBatches).spend, 0);
 
-  const soonest = bills
-    .filter((b) => b.daysLeft != null)
-    .sort((a, b) => a.daysLeft - b.daysLeft)[0];
+  const soonest = bills.filter((b) => b.daysLeft != null).sort((a, b) => a.daysLeft - b.daysLeft)[0];
 
   if (!knownBank && cardAccounts.length === 0) {
     return `<div class="totals-card"><p class="muted-note">Add a bank account or card and import a statement to see your net position here.</p></div>`;
@@ -73,15 +80,28 @@ function renderNetPosition(accounts, transactions, importBatches) {
       ? `<span class="bill-overdue">overdue</span>`
       : soonest.daysLeft === 0
         ? `<span class="bill-urgent">due today</span>`
-        : `<span class="${soonest.daysLeft <= 3 ? 'bill-urgent' : 'muted'}">soonest in ${soonest.daysLeft}d</span>`
+        : `<span class="${soonest.daysLeft <= 3 ? 'bill-urgent' : 'muted'}">in ${soonest.daysLeft}d</span>`
     : '';
 
+  // The number that actually answers "can I afford this?" is what's left once
+  // the cards are settled, so that gets the hero treatment - not the raw
+  // balance, which flatters you by the size of your unpaid bills.
+  const net = totalBank - billsDue;
   return `
-    <div class="totals-card">
-      <div class="totals-row"><span>In your bank</span><span>${knownBank ? formatCurrency(totalBank) : '<span class="muted">unknown</span>'}</span></div>
-      <div class="totals-row"><span>Card bills due ${dueNote}</span><span class="out">${formatCurrency(billsDue)}</span></div>
-      ${knownBank ? `<div class="totals-row net"><span>Left after paying bills</span><span>${formatSignedCurrency(totalBank - billsDue)}</span></div>` : ''}
-      ${unbilled > 0 ? `<div class="muted-note">plus ${formatCurrency(unbilled)} spent on cards since your last statements, not billed yet</div>` : ''}
+    <div class="hero">
+      <p class="hero-label">${knownBank ? 'Left after paying bills' : 'Card bills due'}</p>
+      <p class="hero-amount ${knownBank ? (net < 0 ? 'negative' : '') : 'negative'}">${knownBank ? formatSignedCurrency(net) : formatCurrency(billsDue)}</p>
+      ${unbilled > 0 ? `<p class="hero-sub">Plus ${formatCurrency(unbilled)} spent on cards since your last statements, not billed yet.</p>` : ''}
+      <div class="hero-split">
+        <div class="hero-stat">
+          <span class="stat-label">In your bank</span>
+          <span class="stat-value">${knownBank ? formatCurrency(totalBank) : '—'}</span>
+        </div>
+        <div class="hero-stat">
+          <span class="stat-label">Bills due ${dueNote}</span>
+          <span class="stat-value out">${formatCurrency(billsDue)}</span>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -90,17 +110,24 @@ async function renderAttention(container, transactions) {
   const el = container.querySelector('#attention-section');
   if (!el) return;
 
-  const accounts = await getAll('accounts');
-  const uncategorizedCount = transactions.filter((t) => !t.categoryId).length;
-  const monthStart = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`;
+  const [accounts, categories, budgets] = await Promise.all([getAll('accounts'), getAll('categories'), getBudgets()]);
+  const uncategorized = transactions.filter((t) => needsCategory(t));
+  const monthStart = monthStartISO();
   const dismissed = new Set(await getSetting('dismissedAnomalies', []));
   const anomalies = (await detectAnomalies(monthStart)).filter((a) => !dismissed.has(a.transaction.id));
+
+  // How many of the uncategorised ones the app could sort on its own from what
+  // it has already learned. Offering "sort 94 of these for me" is a far better
+  // answer than "136 need a category".
+  const autoSortable = uncategorized.length ? await applyLearnedCategories({ dryRun: true }) : 0;
 
   const dueCards = accounts
     .map((a) => ({ account: a, bill: cardBillDue(a) }))
     .filter((x) => x.bill && !x.bill.paid && x.bill.daysLeft != null && x.bill.daysLeft <= 5);
 
-  if (uncategorizedCount === 0 && anomalies.length === 0 && dueCards.length === 0) {
+  const budgetAlerts = budgetStatus(budgets, categories, transactions, monthStart).filter((b) => b.state !== 'ok');
+
+  if (uncategorized.length === 0 && anomalies.length === 0 && dueCards.length === 0 && budgetAlerts.length === 0) {
     el.innerHTML = `<h3>Needs your attention</h3><div class="totals-card"><p class="muted-note">Nothing to deal with right now.</p></div>`;
     return;
   }
@@ -117,7 +144,34 @@ async function renderAttention(container, transactions) {
         </div>`
         )
         .join('')}
-      ${uncategorizedCount > 0 ? `<div class="attention-row"><span>${uncategorizedCount} transaction${uncategorizedCount === 1 ? '' : 's'} need${uncategorizedCount === 1 ? 's' : ''} a category</span><button type="button" class="btn-tiny" id="go-transactions-btn">Sort them</button></div>` : ''}
+      ${budgetAlerts
+        .map((b) => {
+          const { icon, color } = categoryStyle(b.name);
+          return `
+        <div class="attention-row">
+          <span class="breakdown-label">
+            <span class="cat-chip" style="--chip-color:${color}">${icon}</span>
+            <span>${escapeHtml(b.name)} budget<br><span class="muted-note ${b.state === 'over' ? 'bill-overdue' : 'bill-urgent'}">${
+              b.state === 'over' ? `over by ${formatCurrency(-b.left)}` : `${formatCurrency(b.left)} left of ${formatCurrency(b.limit)}`
+            }</span></span>
+          </span>
+          <button type="button" class="btn-tiny budget-open" data-id="${b.categoryId}">See</button>
+        </div>`;
+        })
+        .join('')}
+      ${
+        uncategorized.length > 0
+          ? `<div class="attention-row">
+              <span>${uncategorized.length} transaction${uncategorized.length === 1 ? '' : 's'} need${uncategorized.length === 1 ? 's' : ''} a category${
+                autoSortable > 0 ? `<br><span class="muted-note">${autoSortable} can be sorted from what you've already taught it</span>` : ''
+              }</span>
+              <span class="attention-actions">
+                ${autoSortable > 0 ? `<button type="button" class="btn-tiny primary" id="auto-sort-btn">Sort ${autoSortable}</button>` : ''}
+                <button type="button" class="btn-tiny" id="go-transactions-btn">Open</button>
+              </span>
+            </div>`
+          : ''
+      }
       ${anomalies
         .slice(0, 3)
         .map(
@@ -140,6 +194,23 @@ async function renderAttention(container, transactions) {
       container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'transactions', filter: 'uncategorized' } }));
     });
   }
+
+  const autoBtn = el.querySelector('#auto-sort-btn');
+  if (autoBtn) {
+    autoBtn.addEventListener('click', async () => {
+      autoBtn.disabled = true;
+      autoBtn.textContent = 'Sorting…';
+      const n = await applyLearnedCategories();
+      showToast(`Sorted ${n} transaction${n === 1 ? '' : 's'}`);
+      render(container);
+    });
+  }
+
+  el.querySelectorAll('.budget-open').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'transactions', categoryId: btn.dataset.id, range: 'this-month' } }));
+    });
+  });
 
   el.querySelectorAll('.mark-paid').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -210,7 +281,7 @@ async function renderUpcoming(container) {
   });
 }
 
-// --- Existing range breakdown ---
+// --- Range breakdown ---
 
 function getRangeDates() {
   const now = new Date();
@@ -228,7 +299,7 @@ function getRangeDates() {
 }
 
 function toISODate(d) {
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 // Comparing a month that's only 13 days old against a full previous month
@@ -278,14 +349,19 @@ async function renderContent(container) {
     if (t.direction === 'credit') totalIn += t.amount;
     else totalOut += t.amount;
 
-    addToBucket(byCategory, t.categoryId || 'uncategorized', t);
-    addToBucket(byAccount, t.accountId, t);
+    // Split-aware: one transaction can land in several categories.
+    for (const slice of categorySlices(t)) {
+      addToBucket(byCategory, slice.categoryId || 'uncategorized', t.direction, slice.amount);
+    }
+    addToBucket(byAccount, t.accountId, t.direction, t.amount);
   }
 
   let comparisonHtml = '';
   const comparison = comparisonPeriod();
   if (comparison) {
-    const prevOut = transactions.filter((t) => t.date >= comparison.from && t.date <= comparison.to && !t.isTransfer && t.direction === 'debit').reduce((s, t) => s + t.amount, 0);
+    const prevOut = transactions
+      .filter((t) => t.date >= comparison.from && t.date <= comparison.to && !t.isTransfer && t.direction === 'debit')
+      .reduce((s, t) => s + t.amount, 0);
     if (prevOut > 0) {
       const pctChange = Math.round(((totalOut - prevOut) / prevOut) * 100);
       const arrow = pctChange > 0 ? '↑' : pctChange < 0 ? '↓' : '→';
@@ -302,12 +378,51 @@ async function renderContent(container) {
       ${comparisonHtml}
       <div class="totals-row net"><span>Net</span><span>${formatSignedCurrency(totalIn - totalOut)}</span></div>
     </div>
+    <button type="button" id="recap-link" class="btn-secondary btn-block">See your month in review →</button>
     <h3>Where it went</h3>
-    <ul class="breakdown-list">${renderBreakdown(byCategory, catName)}</ul>
+    <ul class="breakdown-list">${renderCategoryBreakdown(byCategory, catName, totalOut)}</ul>
     <h3>Which account paid</h3>
     <p class="group-subtitle">Every account you've added. Ones you didn't touch in this period say so, rather than quietly vanishing.</p>
     <ul class="breakdown-list">${renderAccountBreakdown(byAccount, accounts, transactions)}</ul>
   `;
+
+  content.querySelector('#recap-link').addEventListener('click', () => {
+    container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'recap' } }));
+  });
+}
+
+function addToBucket(map, key, direction, amount) {
+  if (!map.has(key)) map.set(key, { in: 0, out: 0 });
+  const bucket = map.get(key);
+  if (direction === 'credit') bucket.in += amount;
+  else bucket.out += amount;
+}
+
+function renderCategoryBreakdown(map, nameFn, totalOut) {
+  const rows = [...map.entries()].sort((a, b) => b[1].out - b[1].in - (a[1].out - a[1].in));
+  if (rows.length === 0) return '<li class="empty">No transactions.</li>';
+
+  return rows
+    .map(([id, v]) => {
+      const name = nameFn(id);
+      const { icon, color } = categoryStyle(name);
+      const share = totalOut > 0 ? Math.min(100, Math.round((v.out / totalOut) * 100)) : 0;
+      return `
+      <li class="breakdown-row" style="--chip-color:${color}">
+        <span class="breakdown-label">
+          <span class="cat-chip" style="--chip-color:${color}">${icon}</span>
+          <span>
+            ${escapeHtml(name)}
+            ${v.out ? `<span class="breakdown-bar" style="width:${Math.max(6, share)}%"></span>` : ''}
+          </span>
+        </span>
+        <span class="amounts">
+          ${v.out ? `<span class="out">-${formatCurrency(v.out)}</span>` : ''}
+          ${v.in ? `<span class="in">+${formatCurrency(v.in)}</span>` : ''}
+        </span>
+      </li>`;
+    })
+    .join('');
 }
 
 // Unlike the category breakdown, this lists accounts with no activity too.
@@ -336,9 +451,13 @@ function renderAccountBreakdown(byAccount, accounts, transactions) {
     .map(({ account, bucket, last }) => {
       const used = bucket.out || bucket.in;
       const note = last ? `nothing in this period · last used ${formatDateNice(last)}` : 'never used';
+      const icon = account.type === 'card' ? '💳' : account.type === 'cash' ? '💵' : '🏦';
       return `
       <li class="breakdown-row${used ? '' : ' breakdown-idle'}">
-        <span>${escapeHtml(account.label)}${used ? '' : `<br><span class="muted-note">${note}</span>`}</span>
+        <span class="breakdown-label">
+          <span class="cat-chip" style="--chip-color:#8b5cf6">${icon}</span>
+          <span>${escapeHtml(account.label)}${used ? '' : `<br><span class="muted-note">${note}</span>`}</span>
+        </span>
         <span class="amounts">
           ${bucket.out ? `<span class="out">-${formatCurrency(bucket.out)}</span>` : ''}
           ${bucket.in ? `<span class="in">+${formatCurrency(bucket.in)}</span>` : ''}
@@ -347,30 +466,6 @@ function renderAccountBreakdown(byAccount, accounts, transactions) {
       </li>`;
     })
     .join('');
-}
-
-function addToBucket(map, key, t) {
-  if (!map.has(key)) map.set(key, { in: 0, out: 0 });
-  const bucket = map.get(key);
-  if (t.direction === 'credit') bucket.in += t.amount;
-  else bucket.out += t.amount;
-}
-
-function renderBreakdown(map, nameFn) {
-  const rows = [...map.entries()]
-    .sort((a, b) => b[1].out - b[1].in - (a[1].out - a[1].in))
-    .map(
-      ([id, v]) => `
-      <li class="breakdown-row">
-        <span>${escapeHtml(nameFn(id))}</span>
-        <span class="amounts">
-          ${v.out ? `<span class="out">-${formatCurrency(v.out)}</span>` : ''}
-          ${v.in ? `<span class="in">+${formatCurrency(v.in)}</span>` : ''}
-        </span>
-      </li>`
-    )
-    .join('');
-  return rows || '<li class="empty">No transactions.</li>';
 }
 
 function escapeHtml(str) {

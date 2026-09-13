@@ -1,9 +1,39 @@
 import { getAll, remove } from '../db.js';
 import { exportEncrypted, decryptBackup, restoreBackup } from '../backup.js';
 import { formatDateNice } from '../format.js';
+import { remindersEnabled, reminderDaysBefore, permissionState, enableReminders, disableReminders, refreshSchedule } from '../reminders.js';
+import { setSetting } from '../db.js';
+import { showToast } from '../toast.js';
 
 export async function render(container) {
+  const enabled = await remindersEnabled();
+  const permission = permissionState();
+  const daysBefore = await reminderDaysBefore();
+
   container.innerHTML = `
+    <h3>Bill reminders</h3>
+    <p class="group-subtitle">A notification before a card bill or fixed commitment is due. Everything is worked out on this phone - nothing is sent anywhere.</p>
+    <div class="totals-card">
+      ${
+        permission === 'unsupported'
+          ? '<p class="muted-note">This browser doesn\'t support notifications.</p>'
+          : permission === 'denied'
+            ? '<p class="muted-note">Notifications are blocked for this app in your browser settings. You\'ll need to allow them there first.</p>'
+            : `
+        <div class="attention-row">
+          <span>Remind me about bills<br><span class="muted-note" id="reminder-state">${enabled ? 'On' : 'Off'}</span></span>
+          <button type="button" class="btn-tiny ${enabled ? '' : 'primary'}" id="reminder-toggle">${enabled ? 'Turn off' : 'Turn on'}</button>
+        </div>
+        <label class="field" style="margin-top:14px">
+          <span>How many days before</span>
+          <select id="reminder-days">
+            ${[1, 2, 3, 5, 7].map((d) => `<option value="${d}" ${d === daysBefore ? 'selected' : ''}>${d} day${d === 1 ? '' : 's'} before</option>`).join('')}
+          </select>
+        </label>
+        <p class="muted-note">Your phone can only wake this app on its own once it's installed to the home screen and you use it regularly. Otherwise the reminder appears the next time you open it - and the bill is always waiting on the Summary either way.</p>`
+      }
+    </div>
+
     <h3>Backup</h3>
     <p class="group-subtitle">Your data lives only in this browser. If you clear site data or lose the phone, it's gone. A backup is encrypted with a passphrase before it's saved, so it's safe to keep in cloud storage or email.</p>
     <div class="totals-card">
@@ -39,6 +69,29 @@ export async function render(container) {
     <p class="group-subtitle">Undo an import if you loaded the wrong file or imported the same statement twice.</p>
     <div id="import-history"></div>
   `;
+
+  const reminderToggle = container.querySelector('#reminder-toggle');
+  if (reminderToggle) {
+    reminderToggle.addEventListener('click', async () => {
+      if (await remindersEnabled()) {
+        await disableReminders();
+        showToast('Bill reminders off');
+      } else {
+        const result = await enableReminders(Number(container.querySelector('#reminder-days').value));
+        if (!result.ok) {
+          showToast(result.reason === 'denied' ? 'Your browser blocked notifications' : "Couldn't turn on reminders");
+        } else {
+          showToast(result.background ? 'Reminders on, in the background' : 'Reminders on');
+        }
+      }
+      render(container);
+    });
+
+    container.querySelector('#reminder-days').addEventListener('change', async (e) => {
+      await setSetting('reminderDaysBefore', Number(e.target.value));
+      await refreshSchedule();
+    });
+  }
 
   const passEl = container.querySelector('#backup-pass');
   const statusEl = container.querySelector('#backup-status');

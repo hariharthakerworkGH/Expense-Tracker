@@ -1,6 +1,7 @@
 import { openDB, getAll, put } from './db.js';
 import { CASH_ACCOUNT_ID } from './config.js';
 import { detectTransfers } from './transfers.js';
+import { showToast } from './toast.js';
 import * as addView from './views/add.js';
 import * as categoriesView from './views/categories.js';
 import * as summaryView from './views/summary.js';
@@ -9,6 +10,8 @@ import * as accountsView from './views/accounts.js';
 import * as importView from './views/import.js';
 import * as settingsView from './views/settings.js';
 import * as planView from './views/plan.js';
+import * as recapView from './views/recap.js';
+import { refreshSchedule, runDueReminders } from './reminders.js';
 
 const SEED_CATEGORIES = [
   { id: 'cat-food', name: 'Food & Dining', parentId: null },
@@ -32,6 +35,7 @@ const views = {
   transactions: { title: 'Transactions', module: transactionsView },
   accounts: { title: 'Accounts', module: accountsView },
   plan: { title: 'Plan', module: planView },
+  recap: { title: 'Month in review', module: recapView },
   categories: { title: 'Categories', module: categoriesView },
   import: { title: 'Import Statement', module: importView },
   settings: { title: 'Backup & Settings', module: settingsView },
@@ -63,20 +67,6 @@ async function showView(name, params = {}, fromHistory = false) {
   // Switching tabs must land at the top - otherwise a screen you'd scrolled
   // down on leaves the NEXT screen opening mid-scroll, looking stuck/broken.
   window.scrollTo(0, 0);
-}
-
-export function showToast(message) {
-  let el = document.getElementById('toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'toast';
-    el.className = 'toast';
-    document.body.appendChild(el);
-  }
-  el.textContent = message;
-  el.classList.add('visible');
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => el.classList.remove('visible'), 2000);
 }
 
 // Back from any screen returns to Summary. Back from Summary arms an exit: a
@@ -147,7 +137,17 @@ async function init() {
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch((err) => console.error('SW registration failed', err));
+    // Tapping a bill reminder should land on the screen it's about.
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'navigate' && views[e.data.view]) showView(e.data.view);
+    });
   }
+
+  // Reminders are recomputed on open (bills change when statements land) and
+  // anything that came due while the app was closed is shown now.
+  refreshSchedule()
+    .then(() => runDueReminders())
+    .catch(() => {});
 }
 
 init();
