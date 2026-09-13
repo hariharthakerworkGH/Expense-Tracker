@@ -1,7 +1,6 @@
 import { formatCurrency, formatSignedCurrency } from '../format.js';
 import { categoryStyle } from '../category-style.js';
 import { financialSnapshot, affordability, savingsPlan, whereToCut, observations } from '../planner.js';
-import { askGemini, buildContext, getApiKey } from '../ai.js';
 
 // The planning screen: you pick a question, it answers with your own numbers.
 //
@@ -11,11 +10,9 @@ import { askGemini, buildContext, getApiKey } from '../ai.js';
 
 let openQuestion = null;
 let lastAnswer = null;
-let aiKey = null;
 
 export async function render(container) {
-  const [snapshot, key] = await Promise.all([financialSnapshot(), getApiKey()]);
-  aiKey = key;
+  const snapshot = await financialSnapshot();
   const notes = observations(snapshot);
 
   container.innerHTML = `
@@ -26,7 +23,6 @@ export async function render(container) {
       ${questionBtn('afford', '💸', 'Can I afford this?')}
       ${questionBtn('goal', '🎯', 'Help me save for something')}
       ${questionBtn('cut', '✂️', "Where's it going wrong?")}
-      ${questionBtn('ask', '💬', 'Ask me anything')}
     </div>
     <div id="coach-panel">${panelTemplate(snapshot)}</div>
 
@@ -127,33 +123,6 @@ function panelTemplate(s) {
     return `<div class="coach-panel" id="cut-answer">${cutAnswer(s)}</div>`;
   }
 
-  if (openQuestion === 'ask') {
-    if (!aiKey) {
-      return `
-        <div class="coach-panel">
-          <p class="coach-verdict">Needs a Google AI key</p>
-          <p class="recap-line">The three questions above are worked out on this phone. Open-ended ones need a language model, which means a free key from Google AI Studio — and it's the only thing in this app that sends anything outside your device.</p>
-          <button type="button" class="btn-secondary btn-block" id="ask-setup">Set it up in Settings</button>
-        </div>`;
-    }
-    return `
-      <div class="coach-panel">
-        <label class="field">
-          <span>Ask about your money</span>
-          <input type="text" id="ask-input" placeholder="Why was August so expensive?" autocomplete="off">
-        </label>
-        <div class="chip-row">
-          ${['Why was last month expensive?', 'What should I change first?', 'Am I saving enough?']
-            .map((q) => `<button type="button" class="chip ask-suggestion">${escapeHtml(q)}</button>`)
-            .join('')}
-        </div>
-        <button type="button" class="btn-primary" id="ask-go">Ask</button>
-        <div id="ask-answer"></div>
-        <button type="button" class="icon-btn" id="ask-preview">See exactly what gets sent</button>
-        <pre id="ask-preview-body" class="payload-preview" hidden></pre>
-      </div>`;
-  }
-
   return '';
 }
 
@@ -172,60 +141,6 @@ function wirePanel(container, s) {
     affordGo.addEventListener('click', run);
     container.querySelector('#afford-amount').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') run();
-    });
-  }
-
-  const setupBtn = container.querySelector('#ask-setup');
-  if (setupBtn) {
-    setupBtn.addEventListener('click', () => {
-      container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'settings' } }));
-    });
-  }
-
-  const askGo = container.querySelector('#ask-go');
-  if (askGo) {
-    const input = container.querySelector('#ask-input');
-    const answerEl = container.querySelector('#ask-answer');
-
-    const run = async () => {
-      const question = input.value.trim();
-      if (!question) return;
-      askGo.disabled = true;
-      askGo.textContent = 'Thinking…';
-      answerEl.innerHTML = '';
-      try {
-        const reply = await askGemini(question);
-        answerEl.innerHTML = `<div class="coach-answer ai-answer">${formatReply(reply)}<p class="muted-note">Answered by Google Gemini from the summary below. It can still be wrong — check anything surprising against your Transactions.</p></div>`;
-      } catch (err) {
-        answerEl.innerHTML = `<div class="coach-answer"><p class="coach-verdict bad">Couldn't answer</p><p class="recap-line">${escapeHtml(err.message)}</p></div>`;
-      } finally {
-        askGo.disabled = false;
-        askGo.textContent = 'Ask';
-      }
-    };
-
-    askGo.addEventListener('click', run);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') run();
-    });
-    container.querySelectorAll('.ask-suggestion').forEach((chip) => {
-      chip.addEventListener('click', () => {
-        input.value = chip.textContent;
-        run();
-      });
-    });
-
-    const previewBtn = container.querySelector('#ask-preview');
-    previewBtn.addEventListener('click', async () => {
-      const body = container.querySelector('#ask-preview-body');
-      if (!body.hidden) {
-        body.hidden = true;
-        previewBtn.textContent = 'See exactly what gets sent';
-        return;
-      }
-      body.textContent = JSON.stringify(await buildContext(), null, 1);
-      body.hidden = false;
-      previewBtn.textContent = 'Hide';
     });
   }
 
@@ -402,24 +317,6 @@ function noteTemplate(n) {
       </span>
     </div>
   `;
-}
-
-// The model replies in light markdown. Escape everything first, then allow
-// only paragraphs, bullets and bold - never raw HTML from a model's output.
-function formatReply(text) {
-  const safe = escapeHtml(text);
-  const blocks = safe.split(/\n{2,}/).map((block) => {
-    const lines = block.split('\n').filter(Boolean);
-    if (lines.every((l) => /^\s*[-*•]\s+/.test(l))) {
-      return `<ul class="ai-list">${lines.map((l) => `<li>${bold(l.replace(/^\s*[-*•]\s+/, ''))}</li>`).join('')}</ul>`;
-    }
-    return `<p class="recap-line">${bold(lines.join('<br>'))}</p>`;
-  });
-  return blocks.join('');
-}
-
-function bold(s) {
-  return s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 }
 
 function escapeHtml(str) {
