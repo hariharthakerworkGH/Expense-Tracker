@@ -40,7 +40,14 @@
 }
 
 html, body {
-  height: 100%;
+  min-height: 100%;
+}
+
+/* Several components set an explicit `display`, which beats the `hidden`
+   attribute's user-agent `display: none`. Without this, anything toggled
+   with `hidden` (the custom date range, status messages) stays visible. */
+[hidden] {
+  display: none !important;
 }
 
 body {
@@ -49,13 +56,52 @@ body {
   background: var(--bg);
   color: var(--text);
   line-height: 1.45;
-  padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  /* --nav-height is measured from the real nav at runtime (app.js) because a
+     hardcoded guess is wrong the moment the system font scale changes, and
+     the bottom nav then covers the last rows of every screen. */
+  padding-bottom: calc(var(--nav-height, 80px) + 24px);
   -webkit-font-smoothing: antialiased;
 }
 
 .app-header {
   padding: max(20px, env(safe-area-inset-top)) 20px 14px;
   background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.header-btn {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  line-height: 1;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-tiny.danger {
+  color: var(--out);
+  border-color: color-mix(in srgb, var(--out) 40%, transparent);
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px;
+}
+
+.account-form .segmented {
+  margin: 0;
+}
+
+.account-form .field:last-of-type {
+  margin-bottom: 18px;
 }
 
 .app-header h1 {
@@ -483,6 +529,28 @@ h3 {
   background: var(--accent-soft);
 }
 
+.import-row-duplicate {
+  opacity: 0.6;
+}
+
+.badge-warn {
+  color: var(--out) !important;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 0.88rem;
+}
+
+.checkbox-row input {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
 .import-row-badge {
   display: inline-block;
   font-size: 0.68rem;
@@ -556,6 +624,55 @@ h3 {
   color: var(--text-muted);
   font-size: 0.8rem;
   margin: 8px 0 0;
+}
+
+.filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0 4px;
+}
+
+.txn-search {
+  width: 100%;
+  font-size: 1rem;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+}
+
+.filter-row {
+  display: flex;
+  gap: 8px;
+}
+
+.filter-row select {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 10px;
+}
+
+.review-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rv-category {
+  flex: 1;
+  min-width: 140px;
+  font-size: 0.85rem;
+  padding: 10px;
+}
+
+.rv-category.needs-category {
+  border-color: color-mix(in srgb, var(--out) 45%, var(--border));
+  color: var(--out);
 }
 
 .review-list {
@@ -667,4 +784,38 @@ h3 {
 
 .account-headline.out {
   color: var(--out);
+}
+
+.account-headline.in {
+  color: var(--in);
+}
+
+.account-secondary {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.bill-urgent {
+  color: var(--out);
+  font-weight: 600;
+}
+
+.bill-overdue {
+  color: var(--out);
+  font-weight: 700;
+}
+
+.bill-tag {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
 }

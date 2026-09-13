@@ -26,10 +26,38 @@ export async function render(container) {
 
   container.querySelectorAll('.cat-delete').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      if (confirm('Delete this category? Transactions using it will become uncategorized.')) {
-        await remove('categories', btn.dataset.id);
-        render(container);
+      const id = btn.dataset.id;
+      const [transactions, rules] = await Promise.all([getAll('transactions'), getAll('merchantRules')]);
+      const affected = transactions.filter((t) => t.categoryId === id);
+      const children = categories.filter((c) => c.parentId === id);
+
+      const warning = [
+        'Delete this category?',
+        affected.length ? `${affected.length} transaction${affected.length === 1 ? '' : 's'} will go back to uncategorized.` : '',
+        children.length ? `${children.length} sub-categor${children.length === 1 ? 'y' : 'ies'} will move up to the top level.` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      if (!confirm(warning)) return;
+
+      // Clear the dangling reference everywhere, otherwise those transactions
+      // read as "Uncategorized" in summaries but never show up in the
+      // needs-review list, so they become invisible and unfixable.
+      for (const t of affected) {
+        t.categoryId = null;
+        await put('transactions', t);
       }
+      for (const c of children) {
+        c.parentId = null;
+        await put('categories', c);
+      }
+      for (const rule of rules.filter((r) => r.categoryId === id)) {
+        await remove('merchantRules', rule.id);
+      }
+
+      await remove('categories', id);
+      render(container);
     });
   });
 

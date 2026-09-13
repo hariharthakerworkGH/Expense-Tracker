@@ -17,6 +17,11 @@ const TAIL_RE = /^(.*?)\s*(\+)?\s*C\s*([\d,]+\.\d{2})\s*l?$/;
 const CARD_NUMBER_RE = /\b(\d{4,8}X{2,8}(\d{4}))\b/;
 const PERIOD_RE = /(\d{1,2}\s+\w{3},\s+\d{4})\s*-\s*(\d{1,2}\s+\w{3},\s+\d{4})/;
 const SUMMARY_RE = /C\s?([\d,]+\.\d{2})\s*\+?\s*C\s?([\d,]+\.\d{2})\s*\+?\s*C\s?([\d,]+\.\d{2})\s*\+?\s*C\s?([\d,]+\.\d{2})/;
+// The summary prints as an equation - prevDues + payments + purchases +
+// charges = TOTAL AMOUNT DUE - so the figure after the "=" is what's owed.
+const TOTAL_DUE_RE = /=\s*C\s?([\d,]+\.\d{2})/;
+// Minimum due and payment due date share one line: "C880.00 14 Sep, 2026".
+const MIN_DUE_AND_DATE_RE = /^C\s?([\d,]+\.\d{2})\s+(\d{1,2}\s+\w{3},\s+\d{4})$/m;
 
 const MONTHS = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
 
@@ -85,6 +90,15 @@ export function parse(text) {
   if (periodMatch) {
     meta.periodStart = parseLongDate(periodMatch[1]);
     meta.periodEnd = parseLongDate(periodMatch[2]);
+  }
+
+  const totalDueMatch = text.match(TOTAL_DUE_RE);
+  if (totalDueMatch) meta.totalAmountDue = Math.round(toNumber(totalDueMatch[1]) * 100);
+
+  const minDueMatch = text.match(MIN_DUE_AND_DATE_RE);
+  if (minDueMatch) {
+    meta.minimumDue = Math.round(toNumber(minDueMatch[1]) * 100);
+    meta.paymentDueDate = parseLongDate(minDueMatch[2]);
   }
 
   const summaryMatch = text.match(SUMMARY_RE);

@@ -1,6 +1,6 @@
 import { getAll, put } from '../db.js';
 import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
-import { bankBalance, cardCycleSpend } from '../account-metrics.js';
+import { bankBalance, cardCycleSpend, cardBillDue } from '../account-metrics.js';
 import { detectRecurring, nextDueDate } from '../recurring.js';
 import { detectAnomalies } from '../anomalies.js';
 
@@ -55,17 +55,33 @@ function renderNetPosition(accounts, transactions, importBatches) {
   const bankBalances = bankAccounts.map((a) => bankBalance(a, transactions)).filter((b) => b != null);
   const knownBank = bankBalances.length > 0;
   const totalBank = bankBalances.reduce((s, b) => s + b, 0);
-  const totalOwed = cardAccounts.reduce((s, a) => s + cardCycleSpend(a, transactions, importBatches).spend, 0);
+
+  const bills = cardAccounts.map((a) => cardBillDue(a)).filter((b) => b && !b.paid);
+  const billsDue = bills.reduce((s, b) => s + b.amount, 0);
+  const unbilled = cardAccounts.reduce((s, a) => s + cardCycleSpend(a, transactions, importBatches).spend, 0);
+
+  const soonest = bills
+    .filter((b) => b.daysLeft != null)
+    .sort((a, b) => a.daysLeft - b.daysLeft)[0];
 
   if (!knownBank && cardAccounts.length === 0) {
     return `<div class="totals-card"><p class="muted-note">Add a bank account or card and import a statement to see your net position here.</p></div>`;
   }
 
+  const dueNote = soonest
+    ? soonest.daysLeft < 0
+      ? `<span class="bill-overdue">overdue</span>`
+      : soonest.daysLeft === 0
+        ? `<span class="bill-urgent">due today</span>`
+        : `<span class="${soonest.daysLeft <= 3 ? 'bill-urgent' : 'muted'}">soonest in ${soonest.daysLeft}d</span>`
+    : '';
+
   return `
     <div class="totals-card">
       <div class="totals-row"><span>In your bank</span><span>${knownBank ? formatCurrency(totalBank) : '<span class="muted">unknown</span>'}</span></div>
-      <div class="totals-row"><span>You owe on cards</span><span class="out">${formatCurrency(totalOwed)}</span></div>
-      ${knownBank ? `<div class="totals-row net"><span>Left after paying cards</span><span>${formatSignedCurrency(totalBank - totalOwed)}</span></div>` : ''}
+      <div class="totals-row"><span>Card bills due ${dueNote}</span><span class="out">${formatCurrency(billsDue)}</span></div>
+      ${knownBank ? `<div class="totals-row net"><span>Left after paying bills</span><span>${formatSignedCurrency(totalBank - billsDue)}</span></div>` : ''}
+      ${unbilled > 0 ? `<div class="muted-note">plus ${formatCurrency(unbilled)} spent on cards since your last statements, not billed yet</div>` : ''}
     </div>
   `;
 }
@@ -103,7 +119,7 @@ async function renderAttention(container, transactions) {
   const goBtn = el.querySelector('#go-transactions-btn');
   if (goBtn) {
     goBtn.addEventListener('click', () => {
-      container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'transactions' } }));
+      container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'transactions', filter: 'uncategorized' } }));
     });
   }
 }
@@ -174,15 +190,23 @@ function toISODate(d) {
   return d.toISOString().slice(0, 10);
 }
 
-function previousPeriod(from, to) {
-  const start = new Date(from);
-  const end = new Date(to);
-  const spanDays = Math.round((end - start) / (1000 * 60 * 60 * 24)) + 1;
-  const prevEnd = new Date(start);
-  prevEnd.setDate(prevEnd.getDate() - 1);
-  const prevStart = new Date(prevEnd);
-  prevStart.setDate(prevStart.getDate() - spanDays + 1);
-  return [toISODate(prevStart), toISODate(prevEnd)];
+// Comparing a month that's only 13 days old against a full previous month
+// reads as a huge drop that isn't real, so compare like with like: this
+// month-to-date against the same slice of last month.
+function comparisonPeriod(now = new Date()) {
+  if (currentRange === 'this-month') {
+    const dayOfMonth = now.getDate();
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+    const prevEnd = new Date(now.getFullYear(), now.getMonth() - 1, Math.min(dayOfMonth, prevMonthEnd));
+    return { from: toISODate(prevStart), to: toISODate(prevEnd), label: 'vs the same days last month' };
+  }
+  if (currentRange === 'last-month') {
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    const prevEnd = new Date(now.getFullYear(), now.getMonth() - 1, 0);
+    return { from: toISODate(prevStart), to: toISODate(prevEnd), label: 'vs the month before' };
+  }
+  return null;
 }
 
 async function renderContent(container) {
@@ -218,13 +242,13 @@ async function renderContent(container) {
   }
 
   let comparisonHtml = '';
-  if (currentRange === 'this-month' || currentRange === 'last-month') {
-    const [prevFrom, prevTo] = previousPeriod(from, to);
-    const prevOut = transactions.filter((t) => t.date >= prevFrom && t.date <= prevTo && !t.isTransfer && t.direction === 'debit').reduce((s, t) => s + t.amount, 0);
+  const comparison = comparisonPeriod();
+  if (comparison) {
+    const prevOut = transactions.filter((t) => t.date >= comparison.from && t.date <= comparison.to && !t.isTransfer && t.direction === 'debit').reduce((s, t) => s + t.amount, 0);
     if (prevOut > 0) {
       const pctChange = Math.round(((totalOut - prevOut) / prevOut) * 100);
       const arrow = pctChange > 0 ? '↑' : pctChange < 0 ? '↓' : '→';
-      comparisonHtml = `<div class="muted-note">${arrow} ${Math.abs(pctChange)}% vs the period before</div>`;
+      comparisonHtml = `<div class="muted-note">${arrow} ${Math.abs(pctChange)}% ${comparison.label} (${formatCurrency(prevOut)})</div>`;
     }
   }
 

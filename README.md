@@ -117,6 +117,40 @@ amounts are formatted through `js/format.js`, which uses `Intl.NumberFormat`
 with the `en-IN` locale so large numbers group the Indian way (₹12,34,567.89)
 instead of the Western way (₹1,234,567.89).
 
+## Credit card bills
+Card statements carry the two numbers that actually matter — total amount
+due and payment due date — so both parsers extract them and store them on
+the account (`statementDue`, `statementMinDue`, `statementDueDate`). The
+Accounts screen leads with what's owed and how many days are left, colouring
+it when it's due within three days or overdue; the dashboard sums unpaid
+bills into "Card bills due". Unbilled spend since the last statement is
+shown underneath as the secondary number, because it isn't owed yet.
+
+"Mark as paid" is manual — the app can't reliably tell whether a bank debit
+was for this specific card. Importing a newer statement supersedes the old
+bill and resets the flag automatically.
+
+## Backup and restore
+`js/backup.js` exports every store as JSON, encrypted with AES-GCM using a
+key derived from your passphrase (PBKDF2-SHA256, 210k iterations, random
+salt and IV per file). The file is useless without the passphrase — there is
+no recovery path, by design. Restore replaces everything. Both live under
+the ⚙ button in the header.
+
+This is the only thing standing between you and total data loss: everything
+lives in one browser's IndexedDB, so clearing site data or losing the phone
+wipes it.
+
+## Duplicate imports and undo
+Re-importing a statement you've already loaded would silently double every
+row, so the import screen compares incoming rows against existing
+statement-sourced transactions on that account (same date, amount,
+direction and description), flags the matches, warns that the period
+overlaps a previous import, and offers to skip them — checked by default.
+Every import is also undoable from ⚙ → Import history, which deletes exactly
+the transactions that came from that batch. Manual entries an import
+replaced don't come back, and the confirm says so.
+
 ## Bank balance
 A bank account's balance is a snapshot: the last imported statement's own
 closing balance and date (`account.knownBalance` / `knownBalanceDate`),

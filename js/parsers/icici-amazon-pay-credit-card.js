@@ -88,6 +88,24 @@ export function parse(text) {
     meta.statementPaymentsCreditsTotal = Math.round(toNumber(summaryMatch[4]) * 100);
   }
 
+  // "Total Amount due" and "Minimum Amount due" are labels on their own line,
+  // with the figure on a following line by itself - so take the first
+  // standalone amount after each label rather than assuming adjacency.
+  meta.totalAmountDue = amountAfterLabel(text, /Total Amount due/i);
+  meta.minimumDue = amountAfterLabel(text, /Minimum Amount due/i);
+
+  // The payment due date isn't reliably adjacent to its label, and the
+  // terms-and-conditions pages are full of illustrative example dates. The
+  // real one is the earliest date that falls after the statement period -
+  // every example date in the fine print predates it.
+  if (meta.periodEnd) {
+    const candidates = [...text.matchAll(/\b([A-Z][a-z]+ \d{1,2}, \d{4})\b/g)]
+      .map((m) => parseLongDate(m[1]))
+      .filter((d) => d && d > meta.periodEnd)
+      .sort();
+    if (candidates.length) meta.paymentDueDate = candidates[0];
+  }
+
   const parsedDebitTotal = rows.filter((r) => r.direction === 'debit').reduce((s, r) => s + r.amount, 0);
   const parsedCreditTotal = rows.filter((r) => r.direction === 'credit').reduce((s, r) => s + r.amount, 0);
   meta.parsedDebitTotal = parsedDebitTotal;
@@ -95,6 +113,17 @@ export function parse(text) {
   meta.reconciled = meta.statementPurchasesTotal != null ? Math.abs(parsedDebitTotal - meta.statementPurchasesTotal) < 100 : null;
 
   return { rows, meta };
+}
+
+function amountAfterLabel(text, labelRe) {
+  const lines = text.split('\n');
+  const idx = lines.findIndex((l) => labelRe.test(l));
+  if (idx < 0) return undefined;
+  for (let i = idx + 1; i < Math.min(lines.length, idx + 6); i++) {
+    const m = lines[i].trim().match(/^`\s?([\d,]+\.\d{2})$/);
+    if (m) return Math.round(toNumber(m[1]) * 100);
+  }
+  return undefined;
 }
 
 function parseLongDate(str) {

@@ -37,11 +37,20 @@ export function detect(text) {
 // real narration line: it's either a "Label : value" pair or one of a fixed
 // set of boilerplate phrases, so it's filtered out before narration ever
 // gets accumulated, rather than trying to bound it by position.
-const BOILERPLATE_RE = /^[A-Za-z][A-Za-z0-9 ./]*:\s|^(MR\.|HDFC BANK LIMITED|JOINT HOLDERS|STATEMENT SUMMARY|Generated On|This is a computer|Contents of this statement|State account branch|HDFC Bank GSTIN|Registered Office|Page No)/;
+const BOILERPLATE_RE = /^\*|^[A-Za-z][A-Za-z0-9 ./]*:\s|^(MR\.|HDFC BANK LIMITED|JOINT HOLDERS|STATEMENT SUMMARY|Generated On|This is a computer|Contents of this statement|State account branch|HDFC Bank GSTIN|Registered Office|Page No)/;
 const MAX_NARRATION_PARTS = 3;
 
 export function parse(text) {
-  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !BOILERPLATE_RE.test(l));
+  const rawLines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+
+  // The letterhead and footer are reprinted on every page, so any line that
+  // appears more than once is page furniture. Real narration fragments carry
+  // a unique reference number, so they never repeat. This catches the
+  // address block and wrapped footer sentences without hardcoding them.
+  const seenCount = new Map();
+  for (const l of rawLines) seenCount.set(l, (seenCount.get(l) || 0) + 1);
+
+  const lines = rawLines.filter((l) => !BOILERPLATE_RE.test(l) && !(seenCount.get(l) > 1 && !DATE_START_RE.test(l)));
   const rows = [];
   let currentDate = null;
   let narrationParts = [];
@@ -60,7 +69,13 @@ export function parse(text) {
     }
 
     if (nm) {
-      if (dm) currentDate = toIsoDate2(dm[1], dm[2], dm[3]);
+      // A line carrying both the date and the numbers is a complete
+      // transaction on its own - anything accumulated before it belongs to
+      // the page furniture, not to this row, so start its narration fresh.
+      if (dm) {
+        currentDate = toIsoDate2(dm[1], dm[2], dm[3]);
+        narrationParts = [];
+      }
       const leadNarration = nm[1].trim();
       const parts = leadNarration ? [...narrationParts, leadNarration] : narrationParts;
       rows.push({

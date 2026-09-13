@@ -6,6 +6,7 @@ import * as summaryView from './views/summary.js';
 import * as transactionsView from './views/transactions.js';
 import * as accountsView from './views/accounts.js';
 import * as importView from './views/import.js';
+import * as settingsView from './views/settings.js';
 
 const SEED_CATEGORIES = [
   { id: 'cat-food', name: 'Food & Dining', parentId: null },
@@ -30,6 +31,7 @@ const views = {
   accounts: { title: 'Accounts', module: accountsView },
   categories: { title: 'Categories', module: categoriesView },
   import: { title: 'Import Statement', module: importView },
+  settings: { title: 'Backup & Settings', module: settingsView },
 };
 
 async function seedIfNeeded() {
@@ -55,13 +57,28 @@ async function showView(name, params = {}) {
   window.scrollTo(0, 0);
 }
 
+// The nav's real height depends on the device's font scaling and safe-area
+// inset, so measure it instead of guessing - otherwise it sits on top of the
+// last rows of content.
+function syncNavHeight() {
+  const nav = document.querySelector('.bottom-nav');
+  if (!nav) return;
+  document.documentElement.style.setProperty('--nav-height', `${nav.offsetHeight}px`);
+}
+
 async function init() {
   await openDB();
   await seedIfNeeded();
 
+  syncNavHeight();
+  window.addEventListener('resize', syncNavHeight);
+  window.addEventListener('orientationchange', syncNavHeight);
+
   document.querySelectorAll('.nav-btn').forEach((btn) => {
     btn.addEventListener('click', () => showView(btn.dataset.view));
   });
+
+  document.getElementById('settings-btn').addEventListener('click', () => showView('settings'));
 
   document.addEventListener('navigate', (e) => {
     const { view, ...params } = e.detail;

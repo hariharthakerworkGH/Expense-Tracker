@@ -4,7 +4,7 @@ import { detectParser } from '../parsers/registry.js';
 import { matchCategoryForDescription, learnFromAssignment } from '../merchant-rules.js';
 import { detectTransfers } from '../transfers.js';
 import { matchAgainstManualEntries } from '../reconciliation.js';
-import { formatCurrency } from '../format.js';
+import { formatCurrency, formatDateNice } from '../format.js';
 
 let state = null; // { rows, meta, parser, categories, existingAccount, unmatchedManual }
 
@@ -77,6 +77,8 @@ async function parseFile(container, categories) {
     const existingAccount = accounts.find((a) => a.type === parser.accountType && a.issuer === parser.issuerLabel && a.last4 === meta.accountLast4);
 
     let unmatchedManual = [];
+    let duplicateCount = 0;
+    let priorImport = null;
     if (existingAccount) {
       const allTxns = await getAll('transactions');
       const dates = rows.map((r) => r.date).sort();
@@ -87,9 +89,27 @@ async function parseFile(container, categories) {
       );
       const result = matchAgainstManualEntries(rows, manualInRange);
       unmatchedManual = result.unmatchedManual;
+
+      // Re-importing the same statement would silently double every row, so
+      // flag rows already present from a previous import and let them be
+      // skipped. Matched against statement-sourced rows only - manual entries
+      // are handled by the reconciliation pass above.
+      const alreadyImported = allTxns.filter((t) => t.accountId === existingAccount.id && t.source === 'statement');
+      const seen = new Set(alreadyImported.map((t) => `${t.date}|${t.amount}|${t.direction}|${t.rawDescription}`));
+      for (const row of rows) {
+        if (seen.has(`${row.date}|${row.amount}|${row.direction}|${row.description}`)) {
+          row._duplicate = true;
+          duplicateCount++;
+        }
+      }
+
+      const batches = await getAll('importBatches');
+      priorImport = batches
+        .filter((b) => b.accountId === existingAccount.id && b.periodStart <= rangeEnd && b.periodEnd >= rangeStart)
+        .sort((a, b) => (a.importedAt < b.importedAt ? 1 : -1))[0] || null;
     }
 
-    state = { rows, meta, parser, categories, existingAccount, unmatchedManual };
+    state = { rows, meta, parser, categories, existingAccount, unmatchedManual, duplicateCount, priorImport, skipDuplicates: duplicateCount > 0 };
     showStatus(status, `Parsed ${rows.length} rows.`, false);
     renderResults(resultsEl);
   } catch (err) {
@@ -114,6 +134,7 @@ function renderResults(resultsEl) {
       ${matchedCount ? `<div class="totals-row"><span class="in">${matchedCount} row${matchedCount === 1 ? '' : 's'} match entries you already logged ✓</span></div>` : ''}
       <div class="totals-row"><span>Parsed rows</span><span id="import-row-count"></span></div>
     </div>
+    ${renderDuplicateWarning(state)}
     ${renderUnmatchedManual(unmatchedManual)}
     <div id="import-row-list" class="import-row-list"></div>
     <button type="button" id="import-commit-btn" class="btn-primary">Commit ${rows.length} rows</button>
@@ -125,7 +146,35 @@ function renderResults(resultsEl) {
 
   resultsEl.querySelector('#import-commit-btn').addEventListener('click', () => commit(resultsEl));
 
+  const skipBox = resultsEl.querySelector('#skip-duplicates');
+  if (skipBox) {
+    skipBox.addEventListener('change', () => {
+      state.skipDuplicates = skipBox.checked;
+      updateTotals(resultsEl);
+    });
+  }
+
   updateTotals(resultsEl);
+}
+
+function renderDuplicateWarning({ duplicateCount, priorImport }) {
+  if (!duplicateCount && !priorImport) return '';
+  const priorNote = priorImport
+    ? `<div class="muted-note">You already imported ${formatDateNice(priorImport.periodStart)} – ${formatDateNice(priorImport.periodEnd)} for this account on ${formatDateNice(priorImport.importedAt)}.</div>`
+    : '';
+  if (!duplicateCount) {
+    return `<div class="totals-card warn-card"><div class="totals-row"><span>⚠ Overlapping statement</span></div>${priorNote}</div>`;
+  }
+  return `
+    <div class="totals-card warn-card">
+      <div class="totals-row"><span>⚠ ${duplicateCount} of these rows look already imported</span></div>
+      ${priorNote}
+      <label class="checkbox-row">
+        <input type="checkbox" id="skip-duplicates" checked>
+        <span>Skip the ${duplicateCount} duplicate row${duplicateCount === 1 ? '' : 's'} (recommended)</span>
+      </label>
+    </div>
+  `;
 }
 
 function renderUnmatchedManual(unmatchedManual) {
@@ -163,7 +212,8 @@ function renderReconciliation(meta) {
 
 function rowTemplate(row, idx, categories) {
   return `
-    <div class="import-row ${row._matchedManualId ? 'import-row-matched' : ''}" data-idx="${idx}">
+    <div class="import-row ${row._matchedManualId ? 'import-row-matched' : ''} ${row._duplicate ? 'import-row-duplicate' : ''}" data-idx="${idx}">
+      ${row._duplicate ? '<div class="import-row-badge badge-warn">Already imported</div>' : ''}
       ${row._matchedManualId ? '<div class="import-row-badge">Already logged</div>' : ''}
       <div class="import-row-top">
         <input type="date" class="ir-field ir-date" data-field="date" value="${row.date}">
@@ -223,8 +273,12 @@ function handleClick(e, resultsEl) {
   }
 }
 
+function committableRows() {
+  return state.rows.filter((r) => r && !(state.skipDuplicates && r._duplicate));
+}
+
 function updateTotals(resultsEl) {
-  const remaining = state.rows.filter(Boolean);
+  const remaining = committableRows();
   const countEl = resultsEl.querySelector('#import-row-count');
   if (countEl) countEl.textContent = String(remaining.length);
   const commitBtn = resultsEl.querySelector('#import-commit-btn');
@@ -233,7 +287,7 @@ function updateTotals(resultsEl) {
 
 async function commit(resultsEl) {
   const statusEl = resultsEl.querySelector('#import-commit-status');
-  const rows = state.rows.filter(Boolean);
+  const rows = committableRows();
   if (rows.length === 0) {
     showStatus(statusEl, 'No rows left to commit.', true);
     return;
@@ -262,6 +316,18 @@ async function commit(resultsEl) {
   if (account.type === 'bank' && meta.statedClosingBalance != null) {
     account.knownBalance = Math.round(meta.statedClosingBalance * 100);
     account.knownBalanceDate = periodEnd;
+  }
+  if (account.type === 'card' && meta.totalAmountDue != null) {
+    // A newer statement supersedes the last one, so the "paid" flag resets -
+    // this is a fresh bill, even if the previous one was settled.
+    const isNewerStatement = !account.statementPeriodEnd || periodEnd > account.statementPeriodEnd;
+    if (isNewerStatement) {
+      account.statementDue = meta.totalAmountDue;
+      account.statementMinDue = meta.minimumDue ?? null;
+      account.statementDueDate = meta.paymentDueDate ?? null;
+      account.statementPeriodEnd = periodEnd;
+      account.statementDuePaid = false;
+    }
   }
   await put('accounts', account);
 

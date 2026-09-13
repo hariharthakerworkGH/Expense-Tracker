@@ -14,6 +14,28 @@ export function bankBalance(account, transactions) {
   return balance;
 }
 
+// What the last imported statement says is owed, and whether it's still
+// outstanding. Returns null when no statement has been imported for the card
+// yet - which is different from owing nothing.
+export function cardBillDue(account) {
+  if (account.type !== 'card' || account.statementDue == null) return null;
+  return {
+    amount: account.statementDue,
+    minimum: account.statementMinDue ?? null,
+    dueDate: account.statementDueDate ?? null,
+    paid: account.statementDuePaid === true,
+    daysLeft: account.statementDueDate ? daysUntil(account.statementDueDate) : null,
+  };
+}
+
+function daysUntil(isoDate) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(isoDate);
+  target.setHours(0, 0, 0, 0);
+  return Math.round((target - today) / (1000 * 60 * 60 * 24));
+}
+
 export function cardCycleSpend(account, transactions, importBatches) {
   const cycleStart = currentCycleStart(account, importBatches);
   const spend = transactions
