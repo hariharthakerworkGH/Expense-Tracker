@@ -2,7 +2,7 @@ import { getAll } from '../db.js';
 import { formatCurrency, formatDateNice } from '../format.js';
 import { categoryStyle } from '../category-style.js';
 import { matchCategoryForDescription } from '../merchant-rules.js';
-import { parseAlert, resolveAccount, findExisting } from '../alerts.js';
+import { parseAlert, resolveAccount, findExisting, alertFingerprint } from '../alerts.js';
 import { pendingAlerts, addToInbox, dismissAlert, saveAlert } from '../alert-inbox.js';
 import { showToast } from '../toast.js';
 
@@ -19,32 +19,49 @@ const KIND_LABEL = {
 
 let drafts = [];
 let context = { accounts: [], categories: [] };
+// Each render gets a number; only the newest may paint. Renders can overlap -
+// a background sync refreshing the screen while a paste is being read - and
+// without this two of them would fill the same list and show a card twice.
+let generation = 0;
 
 export async function render(container) {
+  const mine = ++generation;
   const [items, accounts, transactions, categories] = await Promise.all([
     pendingAlerts(),
     getAll('accounts'),
     getAll('transactions'),
     getAll('categories'),
   ]);
-  context = { accounts, categories };
 
-  drafts = [];
+  const built = [];
+  const seenKeys = new Map();
   for (const item of items) {
     const parsed = parseAlert(item.rawText);
     if (!parsed.ok) {
-      drafts.push({ item, parsed });
+      built.push({ item, parsed });
       continue;
     }
     const account = resolveAccount(parsed, accounts, transactions);
-    drafts.push({
+    let existing = findExisting(parsed, account ? account.id : null, transactions);
+    // The same alert can reach the inbox twice by different routes (shared as
+    // an SMS, then pasted from the email). The later copy is marked, so it is
+    // never "ready" and can't be swept up by Save-all alongside the first.
+    const key = alertFingerprint(parsed);
+    if (!existing && seenKeys.has(key)) existing = { kind: 'in-inbox', transaction: seenKeys.get(key) };
+    if (!seenKeys.has(key)) seenKeys.set(key, { date: parsed.date, rawDescription: parsed.description, source: 'inbox' });
+    built.push({
       item,
       parsed,
       account,
-      existing: findExisting(parsed, account ? account.id : null, transactions),
+      existing,
       categoryId: await matchCategoryForDescription(parsed.description),
     });
   }
+
+  // A newer render started while this one was reading; it will paint instead.
+  if (mine !== generation) return;
+  drafts = built;
+  context = { accounts, categories };
 
   const ready = drafts.filter(isReady);
 
@@ -68,7 +85,7 @@ export async function render(container) {
       <button type="button" class="btn-secondary btn-block" id="inbox-paste">Paste from clipboard</button>
       <label class="field" style="margin-top:14px">
         <span>Or paste the message here</span>
-        <textarea id="inbox-text" rows="4" placeholder="Spent Rs.329 On HDFC Bank Card 6671 At SWIGGY…"></textarea>
+        <textarea id="inbox-text" rows="4" spellcheck="false" autocomplete="off" placeholder="Spent Rs.329 On HDFC Bank Card 6671 At SWIGGY…"></textarea>
       </label>
       <button type="button" class="btn-tiny" id="inbox-read">Read it</button>
     </div>
@@ -122,13 +139,13 @@ function draftTemplate(d) {
 
       <label class="field">
         <span>What</span>
-        <input type="text" class="al-desc" value="${escapeAttr(parsed.description)}">
+        <input type="text" class="al-desc" spellcheck="false" autocomplete="off" value="${escapeAttr(parsed.description)}">
       </label>
 
       <div class="alert-grid">
         <label class="field">
           <span>Date${parsed.time ? ` · ${parsed.time}` : ''}</span>
-          <input type="date" class="al-date" value="${parsed.date || new Date().toISOString().slice(0, 10)}">
+          <input type="date" class="al-date" value="${parsed.date || localToday()}">
         </label>
         ${
           partial
@@ -193,6 +210,9 @@ function existingNote(existing) {
   if (existing.kind === 'same-alert') {
     return `<p class="alert-note warn">You've already added this exact alert (${when}).</p>`;
   }
+  if (existing.kind === 'in-inbox') {
+    return `<p class="alert-note warn">This alert is already in the list above — probably the SMS and the email for the same spend.</p>`;
+  }
   if (existing.kind === 'reference') {
     return `<p class="alert-note warn">Already in the app${t.source === 'statement' ? ' from your statement' : ''} — the reference number matches (${when}).</p>`;
   }
@@ -204,6 +224,14 @@ function existingNote(existing) {
 function saveLabel(existing) {
   if (!existing) return 'Save';
   return existing.kind === 'likely' ? "It's a different one — save" : 'Save anyway';
+}
+
+// The date on this phone, not in UTC. toISOString() would give yesterday for
+// anything shared between midnight and 5:30am in India, filing the spend in
+// the wrong day - and on the 1st, the wrong month.
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function wire(root, container) {
@@ -225,12 +253,19 @@ function wire(root, container) {
       return;
     }
 
+    // Redraw the list afterwards - but only if it's still what's on screen. If
+    // you tapped another tab while a save was writing, redrawing here would
+    // paint the alert list over the screen you moved to.
+    const refresh = async () => {
+      if (root.isConnected) await render(container);
+    };
+
     busy = true;
     try {
       if (e.target.closest('.alert-skip') && card) {
         await dismissAlert(card.dataset.id);
         showToast('Removed from the list');
-        await render(container);
+        await refresh();
         return;
       }
 
@@ -242,24 +277,32 @@ function wire(root, container) {
           showToast(edits.error);
           return;
         }
-        await saveAlert(draft.item, edits);
-        showToast(`Saved ${edits.direction === 'credit' ? '+' : '-'}${formatCurrency(edits.amount)}`);
-        await render(container);
+        // Tapping Save on a card that warned it's a duplicate is a deliberate
+        // choice; Save-all never makes that choice for you.
+        const saved = await saveAlert(draft.item, { ...edits, allowDuplicate: Boolean(draft.existing) });
+        showToast(saved ? `Saved ${edits.direction === 'credit' ? '+' : '-'}${formatCurrency(edits.amount)}` : 'Already saved — nothing added');
+        await refresh();
         return;
       }
 
       if (e.target.closest('#inbox-save-all')) {
         let saved = 0;
+        const keysThisPass = new Set();
         for (const d of drafts.filter(isReady)) {
+          const key = alertFingerprint(d.parsed);
+          if (keysThisPass.has(key)) continue;
           const cardEl = root.querySelector(`.alert-card[data-id="${d.item.id}"]`);
           const edits = cardEl ? readEdits(cardEl, d) : null;
-          if (edits && !edits.error) {
-            await saveAlert(d.item, edits);
+          if (!edits || edits.error) continue;
+          // saveAlert re-checks the database itself, so even an alert saved on
+          // another device a moment ago is caught.
+          if (await saveAlert(d.item, edits)) {
             saved++;
+            keysThisPass.add(key);
           }
         }
         showToast(`Saved ${saved} alert${saved === 1 ? '' : 's'}`);
-        await render(container);
+        await refresh();
         return;
       }
 
@@ -272,12 +315,12 @@ function wire(root, container) {
           root.querySelector('#inbox-text').focus();
           return;
         }
-        await ingest(container, text);
+        await ingest(text, refresh);
         return;
       }
 
       if (e.target.closest('#inbox-read')) {
-        await ingest(container, root.querySelector('#inbox-text').value);
+        await ingest(root.querySelector('#inbox-text').value, refresh);
       }
     } finally {
       busy = false;
@@ -285,14 +328,14 @@ function wire(root, container) {
   });
 }
 
-async function ingest(container, text) {
+async function ingest(text, refresh) {
   if (!text || !text.trim()) {
     showToast('Nothing to read yet');
     return;
   }
   const n = await addToInbox(text, 'paste');
-  showToast(`${n} alert${n === 1 ? '' : 's'} added to check`);
-  await render(container);
+  showToast(n ? `${n} alert${n === 1 ? '' : 's'} added to check` : 'Already in the list');
+  await refresh();
 }
 
 function readEdits(card, draft) {

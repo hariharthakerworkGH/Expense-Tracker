@@ -97,6 +97,13 @@ self.addEventListener('fetch', (event) => {
 
   if (event.request.method !== 'GET') return;
 
+  // Only the app's own files are served from the cache. Requests to anywhere
+  // else - above all the GitHub API that sync talks to - must go straight to
+  // the network untouched. Caching them meant sync kept reading the first copy
+  // of your gist it ever fetched, so changes from your other device never
+  // arrived and each device overwrote the gist with a merge against old data.
+  if (url.origin !== self.location.origin) return;
+
   // Page loads can carry a query string (the app is reopened at ./?shared=1
   // after a share). Match those to the cached page regardless, so it opens
   // offline and the request never goes to the network.
@@ -107,8 +114,11 @@ self.addEventListener('fetch', (event) => {
       if (cached) return cached;
       return fetch(event.request)
         .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          // Never keep an error page: a 404 cached once would be served forever.
+          if (response.ok && response.type === 'basic') {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          }
           return response;
         })
         .catch(() => caches.match('./index.html'));

@@ -130,6 +130,7 @@ function wireBackButton() {
 // The delay batches a burst of edits - categorising thirty rows is one upload,
 // not thirty.
 const PUSH_DELAY_MS = 4000;
+const SAFE_TO_REFRESH = new Set(['summary', 'accounts', 'coach', 'recap', 'categories']);
 let pushTimer = null;
 let syncing = false;
 
@@ -146,8 +147,12 @@ async function runSync({ silent = true } = {}) {
     if (!silent && (added || updated || deleted)) {
       showToast(`Synced: ${added} new, ${updated} updated`);
     }
-    // Bringing in another device's changes makes what's on screen stale.
-    if (added || updated || deleted) await showView(currentView, {}, true);
+    // Bringing in another device's changes makes what's on screen stale - but
+    // redrawing a screen you're filling in would throw away what you typed:
+    // an amount on Add, an account picked for an alert, a whole statement
+    // waiting for review on Import. Only screens with nothing to lose are
+    // refreshed; the rest pick the changes up the next time they open.
+    if ((added || updated || deleted) && SAFE_TO_REFRESH.has(currentView)) await showView(currentView, {}, true);
   } catch (err) {
     setSyncIndicator('error', err.message);
   } finally {
@@ -179,23 +184,28 @@ function wireSync() {
   });
 }
 
+// Reuses the update banner for anything that needs you to act before the app
+// can carry on. With no button label, the button is hidden.
+function showNotice(message, buttonLabel = null) {
+  const banner = document.getElementById('update-banner');
+  const text = document.getElementById('update-banner-text');
+  const btn = document.getElementById('update-banner-btn');
+  if (!banner || !text || !btn) return;
+  text.textContent = message;
+  btn.hidden = !buttonLabel;
+  if (buttonLabel) btn.textContent = buttonLabel;
+  banner.hidden = false;
+}
+
 // Tells you, rather than leaving you to wonder, when the copy you are looking
 // at has been superseded by one already downloaded in the background.
 async function showUpdateBannerIfStale() {
   const status = await versionStatus();
   if (!status.stale) return;
-  const banner = document.getElementById('update-banner');
-  const text = document.getElementById('update-banner-text');
-  if (!banner || !text) return;
-  text.textContent = `Version ${status.cached} is ready — you're still seeing version ${status.running}.`;
-  banner.hidden = false;
+  showNotice(`Version ${status.cached} is ready — you're still seeing version ${status.running}.`, 'Reload');
 }
 
 function wireUpdateBanner() {
-  const banner = document.getElementById('update-banner');
-  const btn = document.getElementById('update-banner-btn');
-  if (btn) btn.addEventListener('click', () => window.location.reload());
-
   showUpdateBannerIfStale();
 
   if ('serviceWorker' in navigator) {
@@ -224,6 +234,27 @@ function syncNavHeight() {
 }
 
 async function init() {
+  // Registered before anything else. The service worker is what catches a
+  // shared bank alert on the phone; until it's running, a share would go
+  // straight to GitHub. Waiting on the database and first render first only
+  // widens that gap (for instance after clearing Chrome's site data).
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch((err) => console.error('SW registration failed', err));
+  }
+
+  // Wired first thing, so the banner's Reload works even if startup stalls
+  // below - which is exactly when it's needed.
+  const bannerBtn = document.getElementById('update-banner-btn');
+  if (bannerBtn) bannerBtn.addEventListener('click', () => window.location.reload());
+
+  // Both cases involve two copies of the app open at once during an update.
+  document.addEventListener('db-blocked', () => {
+    showNotice('Expenses is open in another tab or window with the older version. Close it and this one will continue.');
+  });
+  document.addEventListener('db-superseded', () => {
+    showNotice('Expenses was updated in another window.', 'Reload');
+  });
+
   await openDB();
   await seedIfNeeded();
   // Catches card-bill payments in statements imported before detection could
@@ -260,7 +291,6 @@ async function init() {
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch((err) => console.error('SW registration failed', err));
     // Tapping a bill reminder should land on the screen it's about.
     navigator.serviceWorker.addEventListener('message', (e) => {
       if (e.data && e.data.type === 'navigate' && views[e.data.view]) showView(e.data.view);

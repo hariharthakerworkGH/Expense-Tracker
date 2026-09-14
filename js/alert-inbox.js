@@ -28,15 +28,29 @@ export async function pendingCount() {
 }
 
 // Adds whatever text was shared or pasted, one inbox item per alert in it.
+// Returns how many new alerts were added.
 export async function addToInbox(text, via = 'paste', receivedAt = Date.now()) {
   const pieces = splitAlerts(text);
+  // Sharing the same SMS twice (the app was slow to open, so you shared again)
+  // must not queue it twice. Identical text is safe to treat as the same
+  // alert: HDFC card alerts carry the time to the second, UPI alerts carry a
+  // reference, and ICICI's include the remaining limit, which changes with
+  // every spend.
+  const waiting = new Set((await getAll(INBOX_STORE)).map((row) => normalise(row.rawText)));
+  let added = 0;
   for (let i = 0; i < pieces.length; i++) {
+    const key = normalise(pieces[i]);
+    if (waiting.has(key)) continue;
+    waiting.add(key);
     // One millisecond apart, so alerts shared together are listed in the order
     // they arrived rather than in whatever order their random ids sort.
     await put(INBOX_STORE, { id: newId(), rawText: pieces[i], via, receivedAt: receivedAt + i }, { stamp: false });
+    added++;
   }
-  return pieces.length;
+  return added;
 }
+
+const normalise = (text) => String(text).replace(/\s+/g, ' ').trim();
 
 // Moves anything the service worker received from the share sheet into the
 // inbox. Called on every start; returns how many alerts arrived.
@@ -65,8 +79,27 @@ export async function dismissAlert(id) {
 
 // Turns a confirmed draft into a transaction. `edits` are what you changed on
 // the confirm card; the parsed alert supplies everything else.
+//
+// Returns null without saving if the alert has already been dealt with - the
+// inbox item is gone (saved or skipped a moment ago, perhaps by an earlier tap
+// or on a screen that has since refreshed), or a transaction from this exact
+// alert already exists and you didn't explicitly choose "Save anyway". Checked
+// here, against the database as it is now, because the screen's own picture
+// of what's already saved can be out of date.
 export async function saveAlert(item, edits) {
+  const stillWaiting = await get(INBOX_STORE, item.id);
+  if (!stillWaiting) return null;
+
   const parsed = parseAlert(item.rawText);
+  const alertKey = parsed.ok ? alertFingerprint(parsed) : null;
+  if (alertKey && !edits.allowDuplicate) {
+    const already = (await getAll('transactions')).some((t) => t.alertKey === alertKey);
+    if (already) {
+      await dismissAlert(item.id);
+      return null;
+    }
+  }
+
   const transaction = {
     id: newId(),
     accountId: edits.accountId,
@@ -82,7 +115,7 @@ export async function saveAlert(item, edits) {
     // Kept so the statement import can recognise this exact transaction later
     // (the UPI reference is printed on the statement too), and so the same
     // alert shared twice is caught.
-    alertKey: parsed.ok ? alertFingerprint(parsed) : null,
+    alertKey,
     alertRef: parsed.ok ? parsed.ref : null,
   };
   // Your call on transfer-or-not sticks, and automatic detection won't undo it.

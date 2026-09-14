@@ -65,8 +65,22 @@ export function openDB() {
         db.createObjectStore('alertInbox', { keyPath: 'id' });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // A newer version of the app opening in another tab or window needs this
+      // connection closed before it can upgrade the database. Holding it open
+      // would leave that window stuck on a blank screen.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+        document.dispatchEvent(new CustomEvent('db-superseded'));
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
+    // The reverse: this window has the newer version, and an older window that
+    // doesn't know to let go is still open. Say so instead of hanging silently.
+    req.onblocked = () => document.dispatchEvent(new CustomEvent('db-blocked'));
   });
   return dbPromise;
 }

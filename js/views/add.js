@@ -7,7 +7,11 @@ import { formatCurrency } from '../format.js';
 
 export async function render(container, params = {}) {
   const [categories, accounts] = await Promise.all([getAll('categories'), getAll('accounts')]);
-  const today = new Date().toISOString().slice(0, 10);
+  // The phone's own date. toISOString() is UTC, which in India is still
+  // yesterday until 5:30am - so late-night spends were being dated the day
+  // before, and on the 1st of the month, filed under the previous month.
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   const initialAccountId = params.accountId && accounts.some((a) => a.id === params.accountId) ? params.accountId : CASH_ACCOUNT_ID;
 
   container.innerHTML = `
