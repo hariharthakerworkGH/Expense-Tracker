@@ -9,6 +9,7 @@ import { getBudgets, budgetStatusForMonth, cycleAwareEnabled } from '../budgets.
 import { spendingMonthOf, accountMap, currentMonthKey, previousMonthKey, cycleExplanation } from '../spending-month.js';
 import { APP_VERSION, versionStatus, checkForUpdate } from '../version.js';
 import { getSyncConfig } from '../sync.js';
+import { pendingCount } from '../alert-inbox.js';
 import { applyLearnedCategories } from '../merchant-rules.js';
 import { showToast } from '../toast.js';
 
@@ -113,7 +114,12 @@ async function renderAttention(container, transactions) {
   const el = container.querySelector('#attention-section');
   if (!el) return;
 
-  const [accounts, categories, budgets] = await Promise.all([getAll('accounts'), getAll('categories'), getBudgets()]);
+  const [accounts, categories, budgets, alertsWaiting] = await Promise.all([
+    getAll('accounts'),
+    getAll('categories'),
+    getBudgets(),
+    pendingCount(),
+  ]);
   const uncategorized = transactions.filter((t) => needsCategory(t));
   const monthStart = `${currentMonthKey()}-01`;
   const dismissed = new Set(await getSetting('dismissedAnomalies', []));
@@ -130,7 +136,7 @@ async function renderAttention(container, transactions) {
 
   const budgetAlerts = (await budgetStatusForMonth(budgets, categories, transactions, currentMonthKey())).filter((b) => b.state !== 'ok');
 
-  if (uncategorized.length === 0 && anomalies.length === 0 && dueCards.length === 0 && budgetAlerts.length === 0) {
+  if (alertsWaiting === 0 && uncategorized.length === 0 && anomalies.length === 0 && dueCards.length === 0 && budgetAlerts.length === 0) {
     el.innerHTML = `<h3>Needs your attention</h3><div class="totals-card"><p class="muted-note">Nothing to deal with right now.</p></div>`;
     return;
   }
@@ -138,6 +144,14 @@ async function renderAttention(container, transactions) {
   el.innerHTML = `
     <h3>Needs your attention</h3>
     <div class="totals-card">
+      ${
+        alertsWaiting > 0
+          ? `<div class="attention-row">
+              <span>${alertsWaiting} bank alert${alertsWaiting === 1 ? '' : 's'} to check<br><span class="muted-note">Shared from your messages, not counted until you save ${alertsWaiting === 1 ? 'it' : 'them'}</span></span>
+              <button type="button" class="btn-tiny primary" id="go-inbox-btn">Check</button>
+            </div>`
+          : ''
+      }
       ${dueCards
         .map(
           ({ account, bill }) => `
@@ -190,6 +204,13 @@ async function renderAttention(container, transactions) {
         .join('')}
     </div>
   `;
+
+  const inboxBtn = el.querySelector('#go-inbox-btn');
+  if (inboxBtn) {
+    inboxBtn.addEventListener('click', () => {
+      container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'inbox' } }));
+    });
+  }
 
   const goBtn = el.querySelector('#go-transactions-btn');
   if (goBtn) {

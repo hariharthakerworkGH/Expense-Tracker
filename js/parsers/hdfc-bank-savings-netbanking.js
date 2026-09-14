@@ -17,7 +17,10 @@ export const accountType = 'bank';
 export const issuerLabel = 'HDFC Bank';
 
 const DATE_START_RE = /^(\d{2})\/(\d{2})\/(\d{2})\s*(.*)$/;
-const NUMBERS_TAIL_RE = /^(.*?)\S+\s+\d{2}\/\d{2}\/\d{2}\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/;
+// Groups: lead narration, Chq./Ref.No., amount, balance. The reference is kept
+// because a UPI alert shared into the app carries the same number, which lets
+// the two be matched exactly instead of by amount and date.
+const NUMBERS_TAIL_RE = /^(.*?)(\S+)\s+\d{2}\/\d{2}\/\d{2}\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/;
 const ACCOUNT_NUMBER_RE = /:\s*(\d{12,18})\b/;
 // Not anchored to "Statement of account" immediately before "From:" - the
 // text layout reconstruction can put "Statement of account" AFTER the
@@ -81,8 +84,9 @@ export function parse(text) {
       rows.push({
         date: currentDate,
         narrationParts: parts,
-        _amount: toNumber(nm[2]),
-        _balance: toNumber(nm[3]),
+        _ref: nm[2],
+        _amount: toNumber(nm[3]),
+        _balance: toNumber(nm[4]),
       });
       narrationParts = [];
       awaitingNumbers = false;
@@ -122,6 +126,9 @@ export function parse(text) {
       description: r.narrationParts.join(' ').replace(/\s+/g, ' ').trim(),
       amount: Math.round(r._amount * 100),
       direction,
+      // Zero-padded in the statement (e.g. 0000129391235374); matching looks
+      // for the alert's reference inside it, so the padding doesn't matter.
+      ref: /^\d{6,}$/.test(r._ref) ? r._ref : null,
     };
   });
 

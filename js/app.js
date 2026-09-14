@@ -14,6 +14,8 @@ import * as settingsView from './views/settings.js';
 import * as planView from './views/plan.js';
 import * as recapView from './views/recap.js';
 import * as coachView from './views/coach.js';
+import * as inboxView from './views/inbox.js';
+import { collectSharedAlerts } from './alert-inbox.js';
 import { refreshSchedule, runDueReminders } from './reminders.js';
 
 const SEED_CATEGORIES = [
@@ -39,6 +41,7 @@ const views = {
   accounts: { title: 'Accounts', module: accountsView },
   plan: { title: 'Plan', module: planView },
   coach: { title: 'Coach', module: coachView },
+  inbox: { title: 'Bank alerts', module: inboxView },
   recap: { title: 'Month in review', module: recapView },
   categories: { title: 'Categories', module: categoriesView },
   import: { title: 'Import Statement', module: importView },
@@ -74,7 +77,7 @@ async function showView(name, params = {}, fromHistory = false) {
 
   // Replace rather than push: the history stack stays two deep (see
   // wireBackButton) so back always means "go home", never "retrace twenty taps".
-  if (!fromHistory) history.replaceState({ view: name, params }, '', `#${name}`);
+  if (!fromHistory) history.replaceState({ view: name, params }, '', urlFor(name));
 
   // A short fade covers the gap between the blank container and the finished
   // screen, so content arrives instead of popping. Opacity only - a transform
@@ -89,16 +92,23 @@ async function showView(name, params = {}, fromHistory = false) {
 // expect. The stack is deliberately kept two deep - a root sentinel plus the
 // current screen - so someone who has tapped through fifteen screens still
 // gets home in one press instead of pressing back fifteen times.
+// Builds the address for a screen from the path alone. A bare '#summary' would
+// keep whatever query string the page was opened with - after a share that is
+// '?shared=1', which would reopen the alert inbox on every reload.
+function urlFor(view) {
+  return `${location.pathname}#${view}`;
+}
+
 let exitArmed = false;
 function wireBackButton() {
-  history.replaceState({ view: '__root__' }, '', '#summary');
-  history.pushState({ view: 'summary', params: {} }, '', '#summary');
+  history.replaceState({ view: '__root__' }, '', urlFor('summary'));
+  history.pushState({ view: 'summary', params: {} }, '', urlFor('summary'));
 
   window.addEventListener('popstate', () => {
     // We have just landed on the root sentinel. Put the current screen back on
     // top so there is always something to pop next time.
     if (currentView !== 'summary') {
-      history.pushState({ view: 'summary', params: {} }, '', '#summary');
+      history.pushState({ view: 'summary', params: {} }, '', urlFor('summary'));
       showView('summary', {}, true);
       return;
     }
@@ -108,7 +118,7 @@ function wireBackButton() {
     }
     exitArmed = true;
     showToast('Press back again to exit');
-    history.pushState({ view: 'summary', params: {} }, '', '#summary');
+    history.pushState({ view: 'summary', params: {} }, '', urlFor('summary'));
     setTimeout(() => {
       exitArmed = false;
     }, 2000);
@@ -236,8 +246,18 @@ async function init() {
     showView(view, params);
   });
 
+  // A bank alert shared from the phone's share sheet reopens the app at
+  // ?shared=1 with the text parked by the service worker. Pick it up before
+  // anything renders and go straight to it.
+  const openedFromShare = new URLSearchParams(location.search).has('shared');
+  const sharedCount = await collectSharedAlerts();
+
   wireBackButton();
-  await showView('summary', {}, true);
+  if (openedFromShare || sharedCount > 0) {
+    await showView('inbox');
+  } else {
+    await showView('summary', {}, true);
+  }
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch((err) => console.error('SW registration failed', err));

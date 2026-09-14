@@ -84,11 +84,21 @@ async function parseFile(container, categories) {
       const dates = rows.map((r) => r.date).sort();
       const rangeStart = meta.periodStart || dates[0];
       const rangeEnd = meta.periodEnd || dates[dates.length - 1];
-      const manualInRange = allTxns.filter(
-        (t) => t.accountId === existingAccount.id && t.source === 'manual' && t.date >= rangeStart && t.date <= rangeEnd
+      // Entries you logged yourself - by hand or from a shared bank alert -
+      // are what the statement should confirm rather than duplicate. The window
+      // reaches a few days past each end of the period, because a spend alerted
+      // on the 24th can post on the 26th, just inside the next statement.
+      const loggedInRange = allTxns.filter(
+        (t) =>
+          t.accountId === existingAccount.id &&
+          (t.source === 'manual' || t.source === 'alert') &&
+          t.date >= shiftDays(rangeStart, -3) &&
+          t.date <= shiftDays(rangeEnd, 3)
       );
-      const result = matchAgainstManualEntries(rows, manualInRange);
-      unmatchedManual = result.unmatchedManual;
+      const result = matchAgainstManualEntries(rows, loggedInRange);
+      // Only warn about entries that genuinely fall inside this statement's
+      // period; one from just outside it simply belongs to a different statement.
+      unmatchedManual = result.unmatchedManual.filter((t) => t.date >= rangeStart && t.date <= rangeEnd);
 
       // Re-importing the same statement would silently double every row, so
       // flag rows already present from a previous import and let them be
@@ -181,7 +191,7 @@ function renderUnmatchedManual(unmatchedManual) {
   if (!unmatchedManual || unmatchedManual.length === 0) return '';
   return `
     <div class="totals-card warn-card">
-      <div class="totals-row"><span>⚠ ${unmatchedManual.length} manual entr${unmatchedManual.length === 1 ? 'y' : 'ies'} from this period didn't show up in the statement</span></div>
+      <div class="totals-row"><span>⚠ ${unmatchedManual.length} entr${unmatchedManual.length === 1 ? 'y' : 'ies'} you logged in this period didn't show up in the statement</span></div>
       <ul class="breakdown-list">
         ${unmatchedManual
           .map(
@@ -214,7 +224,7 @@ function rowTemplate(row, idx, categories) {
   return `
     <div class="import-row ${row._matchedManualId ? 'import-row-matched' : ''} ${row._duplicate ? 'import-row-duplicate' : ''}" data-idx="${idx}">
       ${row._duplicate ? '<div class="import-row-badge badge-warn">Already imported</div>' : ''}
-      ${row._matchedManualId ? '<div class="import-row-badge">Already logged</div>' : ''}
+      ${row._matchedManualId ? `<div class="import-row-badge">${row._matchedSource === 'alert' ? 'Matches a bank alert you saved' : 'Already logged'}</div>` : ''}
       <div class="import-row-top">
         <input type="date" class="ir-field ir-date" data-field="date" value="${row.date}">
         <input type="text" class="ir-field ir-desc" data-field="description" value="${escapeAttr(row.description)}">
@@ -347,7 +357,10 @@ async function commit(resultsEl) {
       await remove('transactions', row._matchedManualId);
       matchedCount++;
     }
-    await put('transactions', {
+    // Carry over what you decided on the logged copy this row replaces: a
+    // split, or that it was money moved rather than spent.
+    const carry = row._carry || {};
+    const transaction = {
       id: newId(),
       accountId: account.id,
       date: row.date,
@@ -357,9 +370,16 @@ async function commit(resultsEl) {
       categoryId: row.categoryId || null,
       source: 'statement',
       importBatchId: importBatch.id,
-      isTransfer: false,
-      notes: null,
-    });
+      isTransfer: carry.isTransfer === true,
+      notes: carry.notes || null,
+      bankRef: row.ref || null,
+    };
+    if (carry.transferManual) transaction.transferManual = true;
+    if (Array.isArray(carry.splits) && carry.splits.length) {
+      transaction.splits = carry.splits;
+      transaction.categoryId = null;
+    }
+    await put('transactions', transaction);
     if (row.categoryId) {
       await learnFromAssignment(row.description, row.categoryId);
     }
@@ -370,10 +390,16 @@ async function commit(resultsEl) {
   const parts = [`Committed ${rows.length} transactions`];
   if (matchedCount) parts.push(`matched ${matchedCount} you'd already logged`);
   if (transferCount) parts.push(`flagged ${transferCount} as transfers`);
-  if (unmatchedManual && unmatchedManual.length) parts.push(`${unmatchedManual.length} of your manual entries weren't found in the statement - check them above`);
+  if (unmatchedManual && unmatchedManual.length) parts.push(`${unmatchedManual.length} of the entries you logged weren't found in the statement - check them above`);
   showStatus(statusEl, `${parts.join('. ')}. Go to Transactions to categorize the rest.`, false);
   resultsEl.querySelector('#import-commit-btn').disabled = true;
   state = null;
+}
+
+function shiftDays(isoDate, delta) {
+  const d = new Date(`${isoDate}T00:00:00`);
+  d.setDate(d.getDate() + delta);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function showStatus(el, message, isError) {

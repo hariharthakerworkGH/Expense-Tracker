@@ -11,6 +11,10 @@ export async function render(container, params = {}) {
   const initialAccountId = params.accountId && accounts.some((a) => a.id === params.accountId) ? params.accountId : CASH_ACCOUNT_ID;
 
   container.innerHTML = `
+    <button type="button" class="alert-shortcut" id="add-from-alert">
+      <span>📩 Have a bank SMS for this?</span>
+      <span class="alert-shortcut-go">Paste it instead →</span>
+    </button>
     <form id="add-form" class="add-form">
       <label class="field amount-field">
         <span>Amount</span>
@@ -59,6 +63,10 @@ export async function render(container, params = {}) {
       <button type="submit" class="btn-primary">Save</button>
     </form>
   `;
+
+  container.querySelector('#add-from-alert').addEventListener('click', () => {
+    container.dispatchEvent(new CustomEvent('navigate', { bubbles: true, detail: { view: 'inbox' } }));
+  });
 
   let direction = 'debit';
   let categoryId = null;

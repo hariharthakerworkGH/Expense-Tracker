@@ -1,5 +1,5 @@
 const DB_NAME = 'expense-tracker';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbPromise = null;
 
@@ -9,8 +9,9 @@ export function onLocalChange(fn) {
   changeListener = fn;
 }
 function notifyChanged(storeName) {
-  // Sync bookkeeping writing to its own store must not re-trigger a sync.
-  if (storeName === 'syncMeta') return;
+  // Stores that never leave the device must not trigger an upload: sync
+  // bookkeeping, and alerts that haven't been confirmed yet.
+  if (storeName === 'syncMeta' || storeName === 'alertInbox') return;
   if (changeListener) changeListener(storeName);
 }
 
@@ -57,6 +58,11 @@ export function openDB() {
       }
       if (!db.objectStoreNames.contains('syncMeta')) {
         db.createObjectStore('syncMeta', { keyPath: 'id' });
+      }
+      // v4: bank alerts shared into the app, waiting to be confirmed. Kept
+      // apart from transactions so an unconfirmed alert never affects a total.
+      if (!db.objectStoreNames.contains('alertInbox')) {
+        db.createObjectStore('alertInbox', { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);

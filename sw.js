@@ -4,7 +4,7 @@
 // Keep the number identical to APP_VERSION in js/version.js. The app compares
 // the two at runtime to tell the user when they are looking at a stale copy,
 // so they must move together.
-const CACHE_NAME = 'expense-tracker-v21';
+const CACHE_NAME = 'expense-tracker-v22';
 
 const APP_SHELL = [
   './',
@@ -34,6 +34,9 @@ const APP_SHELL = [
   './js/sync.js',
   './js/spending-month.js',
   './js/version.js',
+  './js/alerts.js',
+  './js/alert-inbox.js',
+  './js/views/inbox.js',
   './js/views/coach.js',
   './js/views/add.js',
   './js/views/categories.js',
@@ -58,23 +61,49 @@ const APP_SHELL = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
+      // cache: 'reload' goes to the server for every file. Without it the
+      // browser's own HTTP cache can answer - GitHub Pages lets it keep files
+      // for 10 minutes - and a new version would be installed holding copies
+      // of the previous version's files: "Version 22" running version-21 code.
+      .then((cache) => cache.addAll(APP_SHELL.map((url) => new Request(url, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
 
+// Bank alerts shared into the app wait here until the page picks them up.
+// Must match SHARE_CACHE in js/alert-inbox.js, and must survive the old-cache
+// cleanup below or a share arriving during an update would be thrown away.
+const SHARE_CACHE = 'share-inbox';
+
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME && k !== SHARE_CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+
+  // Something shared to the app from Android's share sheet. This has to be
+  // handled here and never reach the network: GitHub Pages can't accept a
+  // POST, and letting it through would send the bank alert's text - amount,
+  // card digits, merchant - to GitHub's servers.
+  if (event.request.method === 'POST' && url.pathname.endsWith('/share-target')) {
+    event.respondWith(receiveShare(event.request));
+    return;
+  }
+
   if (event.request.method !== 'GET') return;
+
+  // Page loads can carry a query string (the app is reopened at ./?shared=1
+  // after a share). Match those to the cached page regardless, so it opens
+  // offline and the request never goes to the network.
+  const matchOptions = event.request.mode === 'navigate' ? { ignoreSearch: true } : undefined;
+
   event.respondWith(
-    caches.match(event.request).then((cached) => {
+    caches.match(event.request, matchOptions).then((cached) => {
       if (cached) return cached;
       return fetch(event.request)
         .then((response) => {
@@ -86,6 +115,34 @@ self.addEventListener('fetch', (event) => {
     })
   );
 });
+
+// Parks the shared text in the share cache, then reopens the app, which moves
+// it into the alert inbox. Nothing is parsed here - the page owns that logic,
+// so there is one parser, not two that can disagree.
+async function receiveShare(request) {
+  try {
+    const form = await request.formData();
+    const title = String(form.get('title') || '').trim();
+    const text = String(form.get('text') || '').trim();
+    const link = String(form.get('url') || '').trim();
+    // Some apps repeat the start of the message as the title; don't double it.
+    const parts = [title && !text.includes(title) ? title : '', text, link].filter(Boolean);
+    if (parts.length) {
+      const cache = await caches.open(SHARE_CACHE);
+      const key = new URL(`./__shared__/${Date.now()}-${Math.random().toString(36).slice(2)}`, self.registration.scope).href;
+      await cache.put(
+        new Request(key),
+        new Response(JSON.stringify({ text: parts.join('\n'), receivedAt: Date.now() }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }
+  } catch (e) {
+    // A malformed share still opens the app; there's just nothing to pick up.
+  }
+  // 303 turns the POST into a plain page load of the app.
+  return Response.redirect(new URL('./?shared=1', self.registration.scope).href, 303);
+}
 
 /* ---------------------------------------------------------------------------
    Bill reminders.
