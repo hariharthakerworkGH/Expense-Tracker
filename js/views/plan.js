@@ -2,7 +2,8 @@ import { getAll, put, remove, newId, getSetting, setSetting } from '../db.js';
 import { formatCurrency, formatSignedCurrency, ordinal, formatDateNice } from '../format.js';
 import { detectRecurring } from '../recurring.js';
 import { categoryStyle } from '../category-style.js';
-import { getBudgets, setBudget, budgetStatusForMonth, spendByCategoryForMonth, cycleAwareEnabled } from '../budgets.js';
+import { getBudgets, setBudget, budgetStatusForMonth, cycleAwareEnabled } from '../budgets.js';
+import { computeMonthBudget } from '../month-budget.js';
 import { currentMonthKey, cycleExplanation } from '../spending-month.js';
 import { FREQUENCIES, DEFAULT_FREQUENCY, monthlyAmountOf, frequencyOf, frequencyShort, hasDueDate, toMonthly, toYearly, isoLocal } from '../frequency.js';
 import { isFixed, isFinished, isLiveCommitment, coveredByFixed } from '../commitments.js';
@@ -31,30 +32,22 @@ export async function render(container) {
   // Each commitment is stored the way you entered it ("₹120 a day"); what the
   // budget needs is its monthly equivalent.
   const fixedTotal = fixed.reduce((s, r) => s + monthlyAmountOf(r), 0);
-  const fixedCategoryIds = new Set(fixed.map((r) => r.categoryId).filter(Boolean));
 
   const now = new Date();
   const monthKey = currentMonthKey(now);
   const accounts = await getAll('accounts');
   const cycleAware = await cycleAwareEnabled();
-  // Spending on a category that a fixed commitment already covers would be
-  // counted twice - once in the commitment, once here.
-  const spentMap = spendByCategoryForMonth(transactions, accounts, monthKey, cycleAware);
-  let variableSpent = 0;
-  for (const [categoryId, amount] of spentMap) {
-    if (fixedCategoryIds.has(categoryId)) continue;
-    variableSpent += amount;
-  }
 
   const suggestedIncome = suggestIncome(transactions, categories);
   const incomeValue = income != null ? income : suggestedIncome;
   const disposable = incomeValue != null ? incomeValue - fixedTotal : null;
-  const left = disposable != null ? disposable - variableSpent : null;
 
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const daysLeft = Math.max(1, daysInMonth - now.getDate() + 1);
-  const perDay = left != null ? Math.floor(left / daysLeft) : null;
-  const usedPct = disposable > 0 ? Math.min(100, Math.round((variableSpent / disposable) * 100)) : 0;
+  // The same month figure the Summary leads with.
+  const month = await computeMonthBudget(now);
+  const left = month.left;
+  const daysLeft = month.daysLeft;
+  const perDay = month.perDay;
+  const usedPct = month.income > 0 ? Math.min(100, Math.round((month.spentTotal / month.income) * 100)) : 0;
 
   // Hide suggestions already covered by something fixed. Category match only
   // counts when both actually have one - otherwise a single uncategorised fixed
@@ -72,7 +65,7 @@ export async function render(container) {
     ${
       left != null
         ? `<div class="hero">
-            <p class="hero-label">Left to spend</p>
+            <p class="hero-label">Left to spend in ${month.monthName}</p>
             <p class="hero-amount ${left < 0 ? 'negative' : ''}">${formatSignedCurrency(left)}</p>
             <div class="hero-meter"><div class="hero-meter-fill ${left < 0 ? 'over' : ''}" style="width:${usedPct}%"></div></div>
             <p class="hero-sub">${
@@ -82,7 +75,7 @@ export async function render(container) {
             }</p>
             <div class="hero-split">
               <div class="hero-stat"><span class="stat-label">Free each month</span><span class="stat-value">${formatCurrency(disposable)}</span></div>
-              <div class="hero-stat"><span class="stat-label">Spent so far</span><span class="stat-value out">${formatCurrency(variableSpent)}</span></div>
+              <div class="hero-stat"><span class="stat-label">Spent in ${month.monthName}</span><span class="stat-value out">${formatCurrency(month.spentTotal)}</span></div>
             </div>
           </div>`
         : `<p class="import-intro">Put in what you earn and what's already committed each month, and this works out what's genuinely free to spend.</p>`
@@ -98,7 +91,7 @@ export async function render(container) {
         <span>Salary day <span class="muted">(the date it lands in your bank)</span></span>
         <input type="number" id="plan-salary-day" inputmode="numeric" min="1" max="31" step="1" placeholder="e.g. 1" value="${salaryDay || ''}">
       </label>
-      <p class="muted-note">Your salary and its date let the Summary work out how much you can spend before your card bills are paid. Pick 31 for the last day of every month.</p>
+      <p class="muted-note">Pick 31 if it comes on the last day of every month. A salary that lands after the 15th is counted as money for the next month - the 30 September salary pays for October.</p>
       ${
         income == null && suggestedIncome != null
           ? `<p class="muted-note">Suggested from what landed in your Income category recently. Change it if that's not typical.</p>`

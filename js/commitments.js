@@ -29,7 +29,7 @@ export function isLiveCommitment(r, today = isoLocal(new Date())) {
 const CASH_LABEL_RE = /\b(atm|cash)\b/i;
 const CASH_ENTRY_RE = /\bNWD-|\bATM\b|\bCASH\s*(WDL|WITHDRAWAL)|\bATW-/i;
 
-function entryMatcher(item) {
+export function entryMatcher(item) {
   if (item.matchText && item.matchText.trim()) {
     const needle = item.matchText.trim().toLowerCase();
     return (t) => (t.rawDescription || '').toLowerCase().includes(needle);

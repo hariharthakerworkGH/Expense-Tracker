@@ -1,5 +1,4 @@
-import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
-import { computeFreeToSpend } from '../free-to-spend.js';
+import { formatCurrency, formatSignedCurrency } from '../format.js';
 import { isoLocal } from '../frequency.js';
 import { categoryStyle } from '../category-style.js';
 import { financialSnapshot, affordability, savingsPlan, whereToCut, observations } from '../planner.js';
@@ -14,15 +13,13 @@ let openQuestion = null;
 let lastAnswer = null;
 
 export async function render(container) {
-  const [snapshot, fts] = await Promise.all([financialSnapshot(), computeFreeToSpend()]);
+  // The snapshot's "left to spend" is the same month figure the Summary leads
+  // with, so the app never gives two different answers to the same question.
+  const snapshot = await financialSnapshot();
   const notes = observations(snapshot);
-  // "Can I afford this?" answers against the same free-to-spend figure the
-  // Summary leads with - bank plus salary minus everything the cards owe - so
-  // the app never gives two different answers to the same question.
-  const cash = fts.free == null ? { ...snapshot, leftToSpend: null } : { ...snapshot, leftToSpend: fts.free, perDayAllowance: fts.perDay, daysLeft: fts.daysLeft, windowEnd: fts.windowEnd };
 
   container.innerHTML = `
-    ${heroTemplate(snapshot, fts)}
+    ${heroTemplate(snapshot)}
 
     <h3>Ask about your money</h3>
     <div class="coach-questions">
@@ -50,29 +47,30 @@ export async function render(container) {
     });
   });
 
-  wirePanel(container, snapshot, cash);
+  wirePanel(container, snapshot, snapshot);
 }
 
-// The forecast: at the pace you've actually been spending, where does the
-// free-to-spend figure end up by the end of the pay period?
-function heroTemplate(s, fts) {
-  if (fts.free == null) {
+// The forecast: at the pace you've actually been spending, where does this
+// month's left-to-spend end up by the last day of the month?
+function heroTemplate(s) {
+  const m = s.month;
+  if (s.leftToSpend == null) {
     return `
       <div class="hero">
-        <p class="hero-label">Free to spend</p>
+        <p class="hero-label">Left to spend this month</p>
         <p class="hero-amount">—</p>
-        <p class="hero-sub">Import a bank statement so I know your balance, and I can tell you how far your money goes.</p>
+        <p class="hero-sub">Put your monthly income and salary day on the Plan screen, and I can tell you how far your money goes.</p>
       </div>`;
   }
 
-  const projected = s.runRate * fts.daysLeft;
-  const leftAtEnd = fts.free - projected;
+  const projected = s.runRate * s.daysLeft;
+  const leftAtEnd = s.leftToSpend - projected;
   const over = leftAtEnd < 0;
-  const pct = fts.free > 0 ? Math.min(100, Math.round((projected / fts.free) * 100)) : 100;
+  const pct = s.leftToSpend > 0 ? Math.min(100, Math.round((projected / s.leftToSpend) * 100)) : 100;
   return `
     <div class="hero">
-      <p class="hero-label">Free to spend until ${formatDateNice(fts.windowEnd)}</p>
-      <p class="hero-amount ${fts.free < 0 ? 'negative' : ''}">${formatSignedCurrency(fts.free)}</p>
+      <p class="hero-label">Left to spend in ${m.monthName}</p>
+      <p class="hero-amount ${s.leftToSpend < 0 ? 'negative' : ''}">${formatSignedCurrency(s.leftToSpend)}</p>
       <div class="hero-meter"><div class="hero-meter-fill ${over ? 'over' : ''}" style="width:${pct}%"></div></div>
       <p class="hero-sub">${
         s.runRate === 0
@@ -83,7 +81,7 @@ function heroTemplate(s, fts) {
       }</p>
       <div class="hero-split">
         <div class="hero-stat"><span class="stat-label">Your pace</span><span class="stat-value out">${formatCurrency(s.runRate)}/day</span></div>
-        <div class="hero-stat"><span class="stat-label">Safe per day</span><span class="stat-value">${fts.perDay > 0 ? formatCurrency(fts.perDay) : '₹0'}</span></div>
+        <div class="hero-stat"><span class="stat-label">Safe per day</span><span class="stat-value">${m.perDay > 0 ? formatCurrency(m.perDay) : '₹0'}</span></div>
       </div>
     </div>
   `;
@@ -178,24 +176,24 @@ function wirePanel(container, s, cash) {
 
 function affordAnswer(s, a) {
   if (!a.known) {
-    return `<div class="coach-answer"><p class="coach-verdict">I need your bank balance first</p><p class="recap-line">Import a bank statement and I can tell you whether this fits.</p></div>`;
+    return `<div class="coach-answer"><p class="coach-verdict">I need your income first</p><p class="recap-line">Put your monthly income and salary day on the Plan screen and I can tell you whether this fits.</p></div>`;
   }
 
   const verdict = !a.canAfford ? 'Not right now' : a.tight ? 'It fits, but only just' : 'Yes, comfortably';
   const tone = !a.canAfford ? 'bad' : a.tight ? 'warn' : 'good';
-  const until = s.windowEnd ? ` until ${formatDateNice(s.windowEnd)}` : '';
+  const until = ` in ${s.month.monthName}`;
 
   return `
     <div class="coach-answer">
       <p class="coach-verdict ${tone}">${verdict}</p>
       <div class="totals-card">
-        <div class="totals-row"><span>Free to spend${until}</span><span>${formatSignedCurrency(s.leftToSpend)}</span></div>
+        <div class="totals-row"><span>Left to spend${until}</span><span>${formatSignedCurrency(s.leftToSpend)}</span></div>
         <div class="totals-row"><span>This purchase</span><span class="out">-${formatCurrency(a.amount)}</span></div>
         <div class="totals-row net"><span>Left after it</span><span class="${a.after < 0 ? 'out' : 'in'}">${formatSignedCurrency(a.after)}</span></div>
       </div>
       <p class="recap-line">${
         !a.canAfford
-          ? `That's ${formatCurrency(-a.after)} more than you have${until}, once every card is paid. ${
+          ? `That's ${formatCurrency(-a.after)} more than is left${until}. ${
               s.daysLeft > 0 ? `You'd need to find it by cutting back elsewhere — see "Where's it going wrong?".` : ''
             }`
           : a.newPerDay != null && s.daysLeft > 0

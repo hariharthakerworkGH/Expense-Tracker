@@ -3,6 +3,7 @@ import { spendByCategoryForMonth, monthStartISO, getBudgets, cycleAwareEnabled }
 import { currentMonthKey, previousMonthKey } from './spending-month.js';
 import { monthlyAmountOf, yearlyAmountOf } from './frequency.js';
 import { isLiveCommitment } from './commitments.js';
+import { computeMonthBudget } from './month-budget.js';
 
 // The planning engine.
 //
@@ -28,7 +29,6 @@ export async function financialSnapshot(now = new Date()) {
   ]);
 
   const fixed = recurring.filter((r) => isLiveCommitment(r));
-  const fixedMonthly = fixed.reduce((s, r) => s + monthlyAmountOf(r), 0);
   const fixedCategoryIds = new Set(fixed.map((r) => r.categoryId).filter(Boolean));
 
   const monthStart = monthStartISO(now);
@@ -36,21 +36,19 @@ export async function financialSnapshot(now = new Date()) {
   const daysElapsed = now.getDate();
   const daysLeft = Math.max(0, daysInMonth - daysElapsed);
 
-  // Spending a fixed commitment already accounts for must not be counted
-  // again here, or every rent payment would look like a budget blowout.
   const spentMap = spendByCategoryForMonth(transactions, accounts, currentMonthKey(now), cycleAware);
-  let variableSpent = 0;
-  for (const [categoryId, amount] of spentMap) {
-    if (fixedCategoryIds.has(categoryId)) continue;
-    variableSpent += amount;
-  }
 
-  const free = income != null ? income - fixedMonthly : null;
-  const leftToSpend = free != null ? free - variableSpent : null;
+  // The month's figures come from the same place as the Summary's headline,
+  // so Plan, Coach and Summary always agree on what's left.
+  const month = await computeMonthBudget(now);
+  const fixedMonthly = month.committed;
+  const variableSpent = Math.max(0, month.spentNet);
+  const free = month.setUp ? month.income - month.committed : income != null ? income - fixed.reduce((s, r) => s + monthlyAmountOf(r), 0) : null;
+  const leftToSpend = month.left;
 
   // Run rate is measured over the days that have actually happened, then
   // carried across the days that haven't.
-  const runRate = daysElapsed > 0 ? Math.round(variableSpent / daysElapsed) : 0;
+  const runRate = month.runRate;
   const projectedVariable = variableSpent + runRate * daysLeft;
   const projectedOver = free != null ? projectedVariable - free : null;
 
@@ -73,7 +71,8 @@ export async function financialSnapshot(now = new Date()) {
     runRate,
     projectedVariable,
     projectedOver,
-    perDayAllowance: leftToSpend != null && daysLeft > 0 ? Math.floor(leftToSpend / daysLeft) : null,
+    perDayAllowance: leftToSpend != null ? month.perDay : null,
+    month,
     spentMap,
     accounts,
     cycleAware,

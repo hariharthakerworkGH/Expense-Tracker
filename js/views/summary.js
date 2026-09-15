@@ -3,7 +3,7 @@ import { isFixed, isLiveCommitment, coveredByFixed } from '../commitments.js';
 import { isoLocal, hasDueDate, frequencyOf } from '../frequency.js';
 import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
 import { cardBillDue } from '../account-metrics.js';
-import { computeFreeToSpend } from '../free-to-spend.js';
+import { computeMonthBudget } from '../month-budget.js';
 import { detectRecurring, nextDueDate } from '../recurring.js';
 import { detectAnomalies } from '../anomalies.js';
 import { categoryStyle } from '../category-style.js';
@@ -52,78 +52,76 @@ export async function render(container) {
 
 async function renderDashboard(container) {
   const dashboardEl = container.querySelector('#dashboard');
-  const [accounts, transactions, fts] = await Promise.all([getAll('accounts'), getAll('transactions'), computeFreeToSpend()]);
+  const [transactions, budget, cycleAware, accounts] = await Promise.all([getAll('transactions'), computeMonthBudget(), cycleAwareEnabled(), getAll('accounts')]);
 
-  dashboardEl.innerHTML = [renderFreeToSpend(accounts, fts), '<div id="attention-section"></div>', '<div id="upcoming-section"></div>'].join('');
+  dashboardEl.innerHTML = [renderMonthBudget(budget, cycleExplanation(accounts, cycleAware)), '<div id="attention-section"></div>', '<div id="upcoming-section"></div>'].join('');
 
   await renderAttention(container, transactions);
   await renderUpcoming(container);
 }
 
-// The headline: how much can still be spent before the bank runs out, with
-// the sum that produces it one tap away. Showing the working matters as much
-// as the answer - "₹X free" is only trustworthy if you can see it's bank plus
-// salary minus what the cards owe.
-function renderFreeToSpend(accounts, fts) {
-  if (fts.bank == null) {
-    return `<div class="totals-card"><p class="muted-note">${
-      accounts.some((a) => a.type === 'bank')
-        ? 'Import a bank statement so the app knows your balance — then this shows how much you can still spend.'
-        : 'Add your bank account and import a statement to see how much you can still spend.'
-    }</p></div>`;
+// The headline: what's left to spend this month, with the sum one tap away -
+// the month's money, less the fixed commitments, less what's been spent.
+function renderMonthBudget(b, cycleNote) {
+  if (!b.setUp) {
+    return `<div class="totals-card"><p class="muted-note">Put your monthly income and salary day on the Plan screen, and this shows exactly how much is left to spend this month.</p></div>`;
   }
 
-  const until = formatDateNice(fts.windowEnd);
-  const owedCards = fts.cards.filter((c) => c.owed !== 0);
-  const unpaidCards = fts.cards.filter((c) => c.unpaid > 0);
   const line = (label, amount, sign, note = '') =>
     `<div class="totals-row"><span>${label}${note ? `<br><span class="muted-note">${note}</span>` : ''}</span><span class="${sign === '+' ? 'in' : 'out'}">${sign}${formatCurrency(Math.abs(amount))}</span></div>`;
+  const salaryNote = b.salary.received.length
+    ? `came in ${b.salary.received.map((t) => formatDateNice(t.date)).join(', ')}`
+    : b.salary.payday
+      ? `expected ${formatDateNice(b.salary.payday)}`
+      : 'from Plan';
+  const commitmentNote = (c) => {
+    if (c.over) return `${formatCurrency(c.paid)} spent on it — ${formatCurrency(c.over)} over`;
+    if (c.paid >= c.planned) return 'paid ✓';
+    if (c.paid > 0) return `${formatCurrency(c.paid)} gone out, ${formatCurrency(c.remaining)} still to go`;
+    return 'still to go out';
+  };
 
   return `
     <div class="hero">
-      <p class="hero-label">Free to spend until ${until}</p>
-      <p class="hero-amount ${fts.free < 0 ? 'negative' : ''}">${formatSignedCurrency(fts.free)}</p>
+      <p class="hero-label">Left to spend in ${b.monthName}</p>
+      <p class="hero-amount ${b.left < 0 ? 'negative' : ''}">${formatSignedCurrency(b.left)}</p>
       <p class="hero-sub">${
-        fts.free > 0
-          ? `About ${formatCurrency(fts.perDay)} a day for the next ${fts.daysLeft} days — after every card is paid.`
-          : `That's ${formatCurrency(-fts.free)} more than you have, once every card is paid. Spending anything more makes it worse.`
+        b.left > 0
+          ? `About ${formatCurrency(b.perDay)} a day for the ${b.daysLeft} day${b.daysLeft === 1 ? '' : 's'} left in ${b.monthName}.`
+          : `${formatCurrency(-b.left)} over for ${b.monthName}, with ${b.daysLeft} day${b.daysLeft === 1 ? '' : 's'} to go.`
       }</p>
       <div class="hero-split">
         <div class="hero-stat">
-          <span class="stat-label">In your bank</span>
-          <span class="stat-value">${formatCurrency(fts.bank)}</span>
+          <span class="stat-label">Spent in ${b.monthName}</span>
+          <span class="stat-value out">${formatCurrency(b.spentTotal)}</span>
         </div>
         <div class="hero-stat">
-          <span class="stat-label">Owed on cards</span>
-          <span class="stat-value out">${formatCurrency(fts.totals.owedCards + fts.totals.unpaidBills)}</span>
+          <span class="stat-label">In your bank</span>
+          <span class="stat-value">${b.bank == null ? '—' : formatCurrency(b.bank)}</span>
         </div>
       </div>
       <details class="fts-breakdown">
         <summary>How this is worked out</summary>
         <div class="totals-card">
-          ${line('In your bank', fts.bank, '+', fts.bankLines.map((l) => `as of ${formatDateNice(l.asOf)}${l.entriesSince ? ` + ${l.entriesSince} entr${l.entriesSince === 1 ? 'y' : 'ies'} since` : ''}`).join(' · '))}
-          ${
-            fts.salary.counted
-              ? line('Salary', fts.salary.amount, '+', fts.salary.late ? `due ${formatDateNice(fts.salary.date)}, not in yet` : `on ${formatDateNice(fts.salary.date)}`)
-              : fts.salary.alreadyIn
-                ? `<div class="totals-row"><span>Salary<br><span class="muted-note">the ${formatDateNice(fts.salary.date)} salary is already in your bank</span></span><span class="muted">—</span></div>`
-                : ''
-          }
-          ${unpaidCards.map((c) => line(`${escapeHtml(c.account.label)} bill`, c.unpaid, '-', 'billed, not paid yet')).join('')}
-          ${owedCards
-            .map((c) =>
-              line(
-                escapeHtml(c.account.label),
-                c.owed,
-                '-',
-                `${c.statementMissing ? 'since the last imported statement' : 'this cycle'} · ${c.listImportedAt ? `list from ${formatDateNice(c.listImportedAt)}` : 'from saved entries only'}`
-              )
-            )
-            .join('')}
-          ${fts.commitments.map((c) => line(escapeHtml(c.label), c.amount, '-', c.detail)).join('')}
-          <div class="totals-row net"><span>Free to spend</span><span>${formatSignedCurrency(fts.free)}</span></div>
+          ${line(`Salary for ${b.monthName}`, b.salary.amount, '+', salaryNote)}
+          ${b.otherIncomeTotal ? line('Other money in', b.otherIncomeTotal, '+', `${b.otherIncome.length} credit${b.otherIncome.length === 1 ? '' : 's'} to your bank this month`) : ''}
+          ${b.commitments.map((c) => line(escapeHtml(c.label), c.counted, '-', commitmentNote(c))).join('')}
+          ${line('Everything else you spent', b.otherSpent, '-', `bank and cards, ${b.otherRows.length} entr${b.otherRows.length === 1 ? 'y' : 'ies'}`)}
+          ${b.cardRefunds ? line('Card refunds and cashback', b.cardRefunds, '+') : ''}
+          <div class="totals-row net"><span>Left to spend</span><span>${formatSignedCurrency(b.left)}</span></div>
         </div>
-        ${fts.notes.map((n) => `<p class="muted-note">${escapeHtml(n)}</p>`).join('')}
+        ${cycleNote ? `<p class="muted-note">${escapeHtml(cycleNote)}</p>` : ''}
+        ${
+          b.bank != null
+            ? `<div class="totals-card">
+                ${line('In your bank now', b.bank, '+')}
+                ${b.unpaidBills ? line('Card bills not paid yet', b.unpaidBills, '-') : ''}
+                ${b.bankCommitmentsLeft ? line('Commitments still to go out', b.bankCommitmentsLeft, '-') : ''}
+                <div class="totals-row net"><span>Bank after those</span><span>${formatSignedCurrency(b.bankAfter)}</span></div>
+              </div>`
+            : ''
+        }
+        ${b.notes.map((n) => `<p class="muted-note">${escapeHtml(n)}</p>`).join('')}
       </details>
     </div>
   `;
