@@ -1,18 +1,19 @@
 import { getAll, put, remove, newId, getSetting, setSetting } from '../db.js';
-import { formatCurrency, formatSignedCurrency, ordinal } from '../format.js';
+import { formatCurrency, formatSignedCurrency, ordinal, formatDateNice } from '../format.js';
 import { detectRecurring } from '../recurring.js';
 import { categoryStyle } from '../category-style.js';
 import { getBudgets, setBudget, budgetStatusForMonth, spendByCategoryForMonth, cycleAwareEnabled } from '../budgets.js';
 import { currentMonthKey, cycleExplanation } from '../spending-month.js';
-import { FREQUENCIES, DEFAULT_FREQUENCY, monthlyAmountOf, frequencyOf, frequencyShort, hasDueDate, toMonthly, toYearly } from '../frequency.js';
+import { FREQUENCIES, DEFAULT_FREQUENCY, monthlyAmountOf, frequencyOf, frequencyShort, hasDueDate, toMonthly, toYearly, isoLocal } from '../frequency.js';
+import { isFixed, isFinished, isLiveCommitment, coveredByFixed } from '../commitments.js';
 
 let adding = false;
+let editingId = null;
 let addingBudget = false;
 
 // Fixed commitments live in the `recurring` store alongside auto-detected
 // bills; `source` tells them apart so detection never clobbers what you
 // entered by hand.
-const isFixed = (r) => r.source === 'fixed';
 
 export async function render(container) {
   const [categories, recurring, transactions, income, budgets] = await Promise.all([
@@ -24,7 +25,9 @@ export async function render(container) {
   ]);
   const salaryDay = await getSetting('salaryDay', null);
 
-  const fixed = recurring.filter((r) => isFixed(r) && r.active !== false);
+  const todayIso = isoLocal(new Date());
+  const fixed = recurring.filter((r) => isLiveCommitment(r, todayIso));
+  const finished = recurring.filter((r) => isFixed(r) && r.active !== false && isFinished(r, todayIso));
   // Each commitment is stored the way you entered it ("₹120 a day"); what the
   // budget needs is its monthly equivalent.
   const fixedTotal = fixed.reduce((s, r) => s + monthlyAmountOf(r), 0);
@@ -56,14 +59,11 @@ export async function render(container) {
   // Hide suggestions already covered by something fixed. Category match only
   // counts when both actually have one - otherwise a single uncategorised fixed
   // expense would silently hide every suggestion.
-  const detected = (await detectRecurring()).filter(
-    (d) =>
-      !fixed.some(
-        (f) =>
-          f.label.toLowerCase() === d.label.toLowerCase() ||
-          (f.categoryId && d.categoryId && f.categoryId === d.categoryId)
-      )
-  );
+  const detected = (await detectRecurring()).filter((d) => !coveredByFixed(d, [...fixed, ...finished]));
+  const accountName = (id) => {
+    const a = accounts.find((x) => x.id === id);
+    return a ? a.label : null;
+  };
 
   const budgetRows = await budgetStatusForMonth(budgets, categories, transactions, monthKey);
   const budgetable = categories.filter((c) => !budgets[c.id] && !/income|transfer/i.test(c.name));
@@ -110,9 +110,22 @@ export async function render(container) {
     </div>
 
     <h3>Fixed monthly commitments</h3>
-    <p class="group-subtitle">Rent, EMIs, subscriptions - anything you owe every month regardless of how careful you are.</p>
-    ${fixed.length ? `<div class="totals-card">${fixed.map((f) => fixedRow(f, categories)).join('')}</div>` : '<p class="empty">Nothing added yet.</p>'}
-    ${adding ? fixedForm(categories) : '<button type="button" id="plan-add-btn" class="btn-secondary btn-block">Add a fixed expense</button>'}
+    <p class="group-subtitle">EMIs, rent, money you send home, cash you take out - anything that goes out every month however careful you are. Ones paid from your bank are taken off your free-to-spend before they go out. EMIs on your cards are added here when you import the card statement.</p>
+    ${
+      fixed.length
+        ? `<div class="totals-card">${fixed
+            .map((f) => (editingId === f.id ? fixedForm(categories, accounts, f) : fixedRow(f, categories, accountName(f.accountId))))
+            .join('')}</div>`
+        : '<p class="empty">Nothing added yet.</p>'
+    }
+    ${adding ? fixedForm(categories, accounts, null) : '<button type="button" id="plan-add-btn" class="btn-secondary btn-block">Add a fixed expense or EMI</button>'}
+    ${
+      finished.length
+        ? `<details class="fts-breakdown"><summary>Finished (${finished.length})</summary><div class="totals-card">${finished
+            .map((f) => `<div class="attention-row"><span>${escapeHtml(f.label)}<br><span class="muted-note">Last payment ${formatDateNice(f.endDate)}</span></span><button type="button" class="icon-btn fixed-delete" data-id="${f.id}" aria-label="Remove">✕</button></div>`)
+            .join('')}</div></details>`
+        : ''
+    }
 
     <h3>Budgets</h3>
     <p class="group-subtitle">A monthly ceiling for the categories you want to keep an eye on. You'll get a nudge on the Summary before you blow through one.${
@@ -163,9 +176,18 @@ export async function render(container) {
   if (addBtn) {
     addBtn.addEventListener('click', () => {
       adding = true;
+      editingId = null;
       render(container);
     });
   }
+
+  container.querySelectorAll('.fixed-edit').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      editingId = btn.dataset.id;
+      adding = false;
+      render(container);
+    });
+  });
 
   const form = container.querySelector('#fixed-form');
   if (form) {
@@ -175,11 +197,14 @@ export async function render(container) {
     const freqEl = form.querySelector('.ff-frequency');
     const previewEl = form.querySelector('#ff-preview');
     const dayField = form.querySelector('.ff-day-field');
+    const spreadField = form.querySelector('.ff-spread-field');
+    const spreadEl = form.querySelector('.ff-spread');
 
     const updatePreview = () => {
       const raw = parseFloat(amountEl.value);
       const freq = freqEl.value;
-      dayField.hidden = !hasDueDate(freq);
+      spreadField.hidden = freq !== 'monthly';
+      dayField.hidden = !hasDueDate(freq) || (freq === 'monthly' && spreadEl.checked);
       if (!Number.isFinite(raw) || raw <= 0 || freq === 'monthly') {
         previewEl.hidden = true;
         return;
@@ -192,30 +217,43 @@ export async function render(container) {
     };
     amountEl.addEventListener('input', updatePreview);
     freqEl.addEventListener('change', updatePreview);
+    spreadEl.addEventListener('change', updatePreview);
     updatePreview();
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
+      const existing = editingId ? recurring.find((r) => r.id === editingId) : null;
       const label = form.querySelector('.ff-label').value.trim();
       const amount = Math.round(parseFloat(amountEl.value) * 100);
       const day = parseInt(form.querySelector('.ff-day').value, 10);
       if (!label || !Number.isFinite(amount) || amount <= 0) return;
+      const endMonth = form.querySelector('.ff-end').value; // YYYY-MM or ''
+      const dayOfMonth = Number.isInteger(day) && day >= 1 && day <= 31 ? day : existing ? existing.dayOfMonth : 1;
       await put('recurring', {
-        id: `fixed-${newId()}`,
+        ...(existing || {}),
+        id: existing ? existing.id : `fixed-${newId()}`,
         label,
         amount,
         frequency: freqEl.value,
-        dayOfMonth: Number.isInteger(day) && day >= 1 && day <= 31 ? day : 1,
+        dayOfMonth,
+        spread: freqEl.value === 'monthly' && spreadEl.checked,
         categoryId: form.querySelector('.ff-category').value || null,
-        accountId: null,
+        accountId: form.querySelector('.ff-account').value || null,
+        matchText: form.querySelector('.ff-match').value.trim() || null,
+        endDate: endMonth ? lastPaymentInMonth(endMonth, dayOfMonth) : null,
         active: true,
         source: 'fixed',
+        // A statement re-import leaves figures you changed by hand alone.
+        amountEdited: existing ? existing.amountEdited || amount !== existing.amount : undefined,
+        dayEdited: existing ? existing.dayEdited || dayOfMonth !== existing.dayOfMonth : undefined,
       });
       adding = false;
+      editingId = null;
       render(container);
     });
     form.querySelector('.ff-cancel').addEventListener('click', () => {
       adding = false;
+      editingId = null;
       render(container);
     });
   }
@@ -272,6 +310,7 @@ export async function render(container) {
         accountId: d.accountId,
         active: true,
         source: 'fixed',
+        fromRecurringId: d.id,
       });
       render(container);
     });
@@ -319,7 +358,7 @@ function budgetForm(categories) {
   `;
 }
 
-function fixedRow(f, categories) {
+function fixedRow(f, categories, paidFrom) {
   const cat = categories.find((c) => c.id === f.categoryId);
   const { icon, color } = categoryStyle(cat?.name || f.label);
   const freq = frequencyOf(f);
@@ -329,59 +368,101 @@ function fixedRow(f, categories) {
   // For anything that isn't already monthly, show both figures: what you
   // actually pay, and what it costs you per month. The second number is the
   // one people never work out for themselves.
-  const detail = isMonthly
-    ? `${cat ? escapeHtml(cat.name) + ' · ' : ''}due around the ${ordinal(f.dayOfMonth)}`
-    : `${formatCurrency(f.amount)} ${frequencyShort(freq)}${hasDueDate(freq) ? ` · around the ${ordinal(f.dayOfMonth)}` : ''}${cat ? ` · ${escapeHtml(cat.name)}` : ''}`;
+  const when = isMonthly
+    ? f.spread
+      ? 'spread through the month'
+      : `due around the ${ordinal(f.dayOfMonth)}`
+    : `${formatCurrency(f.amount)} ${frequencyShort(freq)}${hasDueDate(freq) ? ` · around the ${ordinal(f.dayOfMonth)}` : ''}`;
+  const parts = [when];
+  if (f.emi) parts.push(`instalment ${f.emi.current} of ${f.emi.total}`);
+  if (f.endDate) parts.push(`last payment ${formatDateNice(f.endDate)}`);
+  parts.push(paidFrom ? `from ${escapeHtml(paidFrom)}` : 'from your bank');
+  if (cat) parts.push(escapeHtml(cat.name));
 
   return `
     <div class="attention-row">
       <span class="breakdown-label">
         <span class="cat-chip" style="--chip-color:${color}">${icon}</span>
-        <span>${escapeHtml(f.label)}<br><span class="muted-note">${detail}</span></span>
+        <span>${escapeHtml(f.label)}<br><span class="muted-note">${parts.join(' · ')}</span></span>
       </span>
       <span class="fixed-row-right">
         <span class="out">${formatCurrency(monthly)}${isMonthly ? '' : '<span class="muted freq-per-month">/mo</span>'}</span>
+        <button type="button" class="icon-btn fixed-edit" data-id="${f.id}" aria-label="Edit">✎</button>
         <button type="button" class="icon-btn fixed-delete" data-id="${f.id}" aria-label="Remove">✕</button>
       </span>
     </div>
   `;
 }
 
-function fixedForm(categories) {
+// `item` is the commitment being edited, or null when adding a new one.
+function fixedForm(categories, accounts, item) {
+  const v = item || {};
+  const freqNow = item ? frequencyOf(item) : DEFAULT_FREQUENCY;
+  const selected = (a, b) => (a === b ? 'selected' : '');
   return `
     <form class="totals-card" id="fixed-form">
       <label class="field">
         <span>What is it</span>
-        <input type="text" class="ff-label" placeholder="e.g. House rent, or morning chai" required>
+        <input type="text" class="ff-label" placeholder="e.g. House loan EMI, Sent to Papa, ATM cash" value="${escapeHtml(v.label || '')}" required>
       </label>
       <label class="field">
         <span>Amount each time</span>
-        <input type="number" class="ff-amount" inputmode="decimal" step="0.01" min="0.01" placeholder="40000" required>
+        <input type="number" class="ff-amount" inputmode="decimal" step="0.01" min="0.01" placeholder="68000" value="${v.amount ? (v.amount / 100).toFixed(2).replace(/\.00$/, '') : ''}" required>
       </label>
       <label class="field">
         <span>How often</span>
         <select class="ff-frequency">
           ${Object.entries(FREQUENCIES)
-            .map(([key, f]) => `<option value="${key}" ${key === DEFAULT_FREQUENCY ? 'selected' : ''}>${f.label}</option>`)
+            .map(([key, f]) => `<option value="${key}" ${selected(key, freqNow)}>${f.label}</option>`)
             .join('')}
         </select>
       </label>
       <p class="freq-preview" id="ff-preview" hidden></p>
-      <label class="field ff-day-field">
-        <span>Day of month it's due</span>
-        <input type="number" class="ff-day" min="1" max="31" placeholder="1">
+      <label class="checkbox-row ff-spread-field">
+        <input type="checkbox" class="ff-spread" ${v.spread ? 'checked' : ''}>
+        <span>Goes out bit by bit through the month <span class="muted">(like ATM cash)</span></span>
       </label>
+      <label class="field ff-day-field">
+        <span>Day of month it goes out</span>
+        <input type="number" class="ff-day" min="1" max="31" placeholder="1" value="${v.dayOfMonth || ''}">
+      </label>
+      <label class="field">
+        <span>Paid from</span>
+        <select class="ff-account">
+          <option value="">Bank account</option>
+          ${accounts
+            .filter((a) => a.type === 'card')
+            .map((a) => `<option value="${a.id}" ${selected(a.id, v.accountId)}>${escapeHtml(a.label)}</option>`)
+            .join('')}
+        </select>
+      </label>
+      <label class="field">
+        <span>Last payment <span class="muted">(optional - for an EMI or loan that ends)</span></span>
+        <input type="month" class="ff-end" value="${v.endDate ? v.endDate.slice(0, 7) : ''}">
+      </label>
+      <label class="field">
+        <span>Bank entry contains <span class="muted">(optional, e.g. "Home Loan EMI")</span></span>
+        <input type="text" class="ff-match" autocomplete="off" spellcheck="false" placeholder="Words from its line on your statement" value="${escapeHtml(v.matchText || '')}">
+      </label>
+      <p class="muted-note">The app uses these words to see when it has already gone out, so it isn't taken off twice. Leave empty and it looks for the same amount instead. ATM cash is recognised on its own.</p>
       <label class="field">
         <span>Category <span class="muted">(so this spend isn't counted twice)</span></span>
         <select class="ff-category">
           <option value="">None</option>
-          ${categories.map((c) => `<option value="${c.id}">${categoryStyle(c.name).icon} ${escapeHtml(c.name)}</option>`).join('')}
+          ${categories.map((c) => `<option value="${c.id}" ${selected(c.id, v.categoryId)}>${categoryStyle(c.name).icon} ${escapeHtml(c.name)}</option>`).join('')}
         </select>
       </label>
-      <button type="submit" class="btn-primary">Add</button>
+      <button type="submit" class="btn-primary">${item ? 'Save' : 'Add'}</button>
       <button type="button" class="btn-tiny ff-cancel btn-block" style="margin-top:10px">Cancel</button>
     </form>
   `;
+}
+
+// "2027-04" and due on the 8th -> 2027-04-08, clamped to the month's end.
+function lastPaymentInMonth(yearMonth, dayOfMonth) {
+  const [y, m] = yearMonth.split('-').map(Number);
+  const lastDay = new Date(y, m, 0).getDate();
+  return isoLocal(new Date(y, m - 1, Math.min(dayOfMonth || 1, lastDay)));
 }
 
 // A rough read on typical income: the average of whatever landed in the
@@ -390,7 +471,7 @@ function suggestIncome(transactions, categories) {
   const incomeCat = categories.find((c) => c.name.toLowerCase() === 'income');
   if (!incomeCat) return null;
   const now = new Date();
-  const cutoff = new Date(now.getFullYear(), now.getMonth() - 3, 1).toISOString().slice(0, 10);
+  const cutoff = isoLocal(new Date(now.getFullYear(), now.getMonth() - 3, 1));
   const credits = transactions.filter((t) => t.categoryId === incomeCat.id && t.direction === 'credit' && !t.isTransfer && t.date >= cutoff);
   if (credits.length === 0) return null;
   const months = new Set(credits.map((t) => t.date.slice(0, 7))).size || 1;

@@ -1,5 +1,6 @@
 import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
 import { computeFreeToSpend } from '../free-to-spend.js';
+import { isoLocal } from '../frequency.js';
 import { categoryStyle } from '../category-style.js';
 import { financialSnapshot, affordability, savingsPlan, whereToCut, observations } from '../planner.js';
 
@@ -121,7 +122,7 @@ function panelTemplate(s) {
         </label>
         <label class="field">
           <span>By when?</span>
-          <input type="date" id="goal-date" value="${defaultDate.toISOString().slice(0, 10)}">
+          <input type="date" id="goal-date" value="${isoLocal(defaultDate)}">
         </label>
         <button type="button" class="btn-primary" id="goal-go">Make a plan</button>
         <div id="goal-answer"></div>

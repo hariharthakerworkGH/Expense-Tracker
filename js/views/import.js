@@ -1,11 +1,13 @@
 import { getAll, put, remove, newId } from '../db.js';
 import { extractPdfText, PdfPasswordError, PdfNoTextError } from '../pdf-text.js';
-import { detectParser } from '../parsers/registry.js';
+import { detectParser, parsers } from '../parsers/registry.js';
 import { matchCategoryForDescription, learnFromAssignment } from '../merchant-rules.js';
 import { detectTransfers } from '../transfers.js';
 import { matchAgainstManualEntries } from '../reconciliation.js';
-import { formatCurrency, formatDateNice } from '../format.js';
-import { currentCycleStart } from '../billing-cycle.js';
+import { formatCurrency, formatDateNice, ordinal } from '../format.js';
+import { listTakenOn } from '../account-metrics.js';
+import { detectEmis, emiCommitment, emiCommitmentId } from '../commitments.js';
+import { isoLocal } from '../frequency.js';
 
 // Two kinds of import share this screen:
 //   - statements (PDF): a closed, billed period. Authoritative.
@@ -110,8 +112,10 @@ async function parsePasted(container) {
     showStatus(status, 'Paste the transactions first.', true);
     return;
   }
-  const parser = detectParser(text);
-  if (!parser || !parser.provisional || typeof parser.splitSections !== 'function') {
+  // Only pasted-list parsers are asked: a whole copied page can also contain a
+  // statement's wording ("Total Amount Due"), which isn't a reason to refuse it.
+  const parser = parsers.find((p) => p.provisional && typeof p.splitSections === 'function' && p.detect(text));
+  if (!parser) {
     showStatus(status, "That doesn't look like HDFC's current transactions list. Each transaction should have a date line, a description, and an amount line ending in \"credit icon\" or \"debit icon\".", true);
     return;
   }
@@ -134,11 +138,14 @@ async function startReview({ parser, text, last4 = null, queue }, status, result
   }
   for (const row of rows) {
     row.categoryId = await matchCategoryForDescription(row.description);
+    // What the row's category is before matching borrows one from an entry
+    // on some card - restored if a different card is picked.
+    row._ownCategoryId = row.categoryId;
   }
 
   const accounts = await getAll('accounts');
   const provisional = Boolean(parser.provisional);
-  const account = provisional ? findCardAccount(accounts, parser, meta.accountLast4) : accounts.find((a) => a.type === parser.accountType && a.issuer === parser.issuerLabel && a.last4 === meta.accountLast4) || null;
+  const account = provisional ? findCardAccount(accounts, parser, meta.accountLast4) : findStatementAccount(accounts, parser, meta.accountLast4);
 
   state = {
     parser,
@@ -149,6 +156,8 @@ async function startReview({ parser, text, last4 = null, queue }, status, result
     accounts,
     queue,
     skipDuplicates: false,
+    // EMI instalments on the statement ("<5/12>"), offered as fixed commitments.
+    emis: parser.accountType === 'card' ? detectEmis(rows).map((emi) => ({ ...emi, keep: true })) : [],
   };
   await analyse();
   showStatus(status, `Read ${rows.length} rows${meta.accountLast4 ? ` for ••${meta.accountLast4}` : ''}.`, false);
@@ -168,6 +177,19 @@ function findCardAccount(accounts, parser, last4) {
   );
 }
 
+// A statement's account: the same bank and digits, otherwise - for a card -
+// the one card with those digits, recorded or linked from a pasted list. A
+// card set up by hand with a differently written bank name would otherwise get
+// a second account beside it, and its list rows would never be replaced.
+function findStatementAccount(accounts, parser, last4) {
+  const exact = accounts.find((a) => a.type === parser.accountType && a.issuer === parser.issuerLabel && a.last4 === last4);
+  if (exact || parser.accountType !== 'card' || !last4) return exact || null;
+  const byDigits = accounts.filter(
+    (a) => a.type === 'card' && (a.last4 === last4 || (Array.isArray(a.linkedLast4s) && a.linkedLast4s.includes(last4)))
+  );
+  return byDigits.length === 1 ? byDigits[0] : null;
+}
+
 // Works out what this import will match, replace and remove on the chosen
 // account. Re-run when the card is picked, since all of it depends on which
 // account the rows land on.
@@ -175,6 +197,7 @@ async function analyse() {
   const { rows, meta, provisional, account } = state;
   for (const row of rows) {
     if (!row) continue;
+    if ('_ownCategoryId' in row) row.categoryId = row._ownCategoryId;
     delete row._matchedManualId;
     delete row._matchedSource;
     delete row._carry;
@@ -201,23 +224,31 @@ async function analyse() {
   // 11 Aug Pepe Jeans refund sits in the cycle from 26 Aug). Picking by row
   // date would leave that row behind when the statement arrives, and the
   // refund would then be counted twice.
+  //
+  // A list is dated by the day it was taken. The pool for a new list is every
+  // list taken since the last imported statement - including ones from a
+  // cycle that has closed but whose statement isn't in yet. The pool for a
+  // statement is every list taken since the previous statement, including
+  // lists taken just after it closed that still show its last few days; of
+  // those, only rows dated inside the statement can be on it.
   const batches = await getAll('importBatches');
-  const cycleStart = currentCycleStart(account, batches);
+  const lastStatementEnd = [account.statementPeriodEnd, ...batches.filter((b) => b.accountId === account.id && !b.provisional).map((b) => b.periodEnd)]
+    .filter(Boolean)
+    .sort()
+    .pop();
   const statementStart = meta.periodStart || rangeStart;
   const statementEnd = meta.periodEnd || rangeEnd;
-  const listBatchIds = new Set(
-    batches
-      .filter(
-        (b) =>
-          b.accountId === account.id &&
-          b.provisional &&
-          (provisional
-            ? !cycleStart || b.periodEnd > cycleStart // earlier lists in this same open cycle
-            : b.periodEnd >= statementStart && b.periodEnd <= statementEnd) // lists taken during the statement's cycle
-      )
-      .map((b) => b.id)
+  const listBatches = batches.filter(
+    (b) =>
+      b.accountId === account.id &&
+      b.provisional &&
+      (provisional ? !lastStatementEnd || listTakenOn(b) > lastStatementEnd : listTakenOn(b) >= statementStart && (b.periodStart || '') <= statementEnd)
   );
-  const listRows = allTxns.filter((t) => t.accountId === account.id && t.source === 'unbilled' && listBatchIds.has(t.importBatchId));
+  const listBatchIds = new Set(listBatches.map((b) => b.id));
+  const takenOnById = new Map(listBatches.map((b) => [b.id, listTakenOn(b)]));
+  const listRows = allTxns.filter(
+    (t) => t.accountId === account.id && t.source === 'unbilled' && listBatchIds.has(t.importBatchId) && (provisional || t.date <= statementEnd)
+  );
 
   // Everything already on this card that this import should confirm rather
   // than duplicate: those list rows, plus entries you logged and bank alerts
@@ -259,7 +290,12 @@ async function analyse() {
   //     from that cycle goes.
   //   - A newer list only speaks for the dates it shows. If you copied just
   //     the latest screenful, older rows it doesn't show aren't "gone".
-  state.superseded = unmatchedManual.filter((t) => t.source === 'unbilled' && (!provisional || inRange(t)));
+  //   - Except rows from a list taken after the statement closed: a row there
+  //     dated inside the period but missing from the statement is most likely
+  //     a refund that posted after the statement, so it stays.
+  state.superseded = unmatchedManual.filter(
+    (t) => t.source === 'unbilled' && (provisional ? inRange(t) : (takenOnById.get(t.importBatchId) || '') <= statementEnd)
+  );
   // Entries you logged yourself that aren't on the list: kept, but pointed out.
   state.unmatchedLogged = unmatchedManual.filter((t) => t.source !== 'unbilled' && inRange(t));
 
@@ -312,8 +348,10 @@ function renderResults(resultsEl) {
     ${provisional ? '' : renderDuplicateWarning(state)}
     ${renderSuperseded(state.superseded, provisional)}
     ${renderUnmatchedLogged(state.unmatchedLogged, provisional)}
+    ${renderEmis(state.emis)}
     <div id="import-row-list" class="import-row-list"></div>
     <button type="button" id="import-commit-btn" class="btn-primary">Save</button>
+    ${state.queue && state.queue.length ? '<button type="button" id="import-skip-btn" class="btn-tiny btn-block" style="margin-top:10px">Skip this card</button>' : ''}
     <p id="import-commit-status" class="status" hidden></p>
     <div id="import-next"></div>
   `;
@@ -350,6 +388,27 @@ function renderSuperseded(list, provisional) {
         ${list.map((t) => `<li class="breakdown-row"><span>${escapeHtml(t.rawDescription)} (${formatDateNice(t.date)})</span><span class="${t.direction === 'credit' ? 'in' : 'out'}">${t.direction === 'credit' ? '+' : '-'}${formatCurrency(t.amount)}</span></li>`).join('')}
       </ul>
       <p class="muted-note">${provisional ? 'Usually a pre-authorisation that was dropped, or a charge reversed before it posted.' : 'They came from a current-transactions list; the statement is the final word.'}</p>
+    </div>
+  `;
+}
+
+function renderEmis(emis) {
+  if (!emis || emis.length === 0) return '';
+  return `
+    <div class="totals-card">
+      <div class="totals-row"><span><strong>EMI${emis.length === 1 ? '' : 's'} on this card</strong></span></div>
+      ${emis
+        .map(
+          (emi, idx) => `
+        <label class="checkbox-row">
+          <input type="checkbox" class="import-emi-keep" data-idx="${idx}" ${emi.keep ? 'checked' : ''}>
+          <span>${escapeHtml(emi.merchant)} · ${formatCurrency(emi.amount)} a month<br><span class="muted-note">instalment ${emi.current} of ${emi.total} · ${
+            emi.left ? `${emi.left} more, last one ${formatDateNice(emi.endDate)}` : 'this is the last one'
+          } · due around the ${ordinal(Number(emi.date.slice(8, 10)))}</span></span>
+        </label>`
+        )
+        .join('')}
+      <p class="muted-note">Ticked EMIs are kept in your fixed commitments on Plan and drop off by themselves after the last instalment.</p>
     </div>
   `;
 }
@@ -457,6 +516,7 @@ function handleFieldChange(e, resultsEl) {
     row.amount = Math.round(parseFloat(e.target.value || '0') * 100);
   } else if (field === 'categoryId') {
     row.categoryId = e.target.value || null;
+    row._ownCategoryId = row.categoryId;
   } else {
     row[field] = e.target.value;
   }
@@ -466,14 +526,25 @@ function handleFieldChange(e, resultsEl) {
 }
 
 function handleClick(e, resultsEl, container) {
-  const nextBtn = e.target.closest('#import-next-btn');
-  if (nextBtn && state && state.queue && state.queue.length) {
+  // Next card, or skipping this one. The queue is taken once and the buttons
+  // cleared at the tap, so a double tap can't jump over a card.
+  const nextBtn = e.target.closest('#import-next-btn, #import-skip-btn');
+  if (nextBtn && state && state.queue && state.queue.length && !committing) {
     const [next, ...rest] = state.queue;
+    state.queue = [];
+    nextBtn.disabled = true;
     const status = container.querySelector('#import-status');
     startReview({ parser: state.parser, text: next.text, last4: next.last4, queue: rest }, status, resultsEl);
     return;
   }
   if (!state || !state.rows) return;
+
+  const emiBox = e.target.closest('.import-emi-keep');
+  if (emiBox && state.emis) {
+    const emi = state.emis[Number(emiBox.dataset.idx)];
+    if (emi) emi.keep = emiBox.checked;
+    return;
+  }
 
   const deleteBtn = e.target.closest('.ir-delete');
   if (deleteBtn) {
@@ -542,22 +613,42 @@ function updateTotals(resultsEl) {
   }
 }
 
+let committing = false;
+
 async function commit(resultsEl) {
+  // A second tap while the first save is still writing would save every row twice.
+  if (committing || !state || !state.rows) return;
   const statusEl = resultsEl.querySelector('#import-commit-status');
+  const commitBtn = resultsEl.querySelector('#import-commit-btn');
   const rows = committableRows();
   if (rows.length === 0) {
     showStatus(statusEl, 'No rows left to save.', true);
     return;
   }
+  if (state.provisional && !state.account) {
+    showStatus(statusEl, 'Pick the card these belong to first.', true);
+    return;
+  }
+  committing = true;
+  if (commitBtn) commitBtn.disabled = true;
+  try {
+    await commitRows(resultsEl, rows, statusEl);
+  } catch (err) {
+    showStatus(statusEl, `Couldn't save: ${err.message}`, true);
+    if (commitBtn) commitBtn.disabled = false;
+  } finally {
+    committing = false;
+  }
+}
 
+async function commitRows(resultsEl, rows, statusEl) {
   const { meta, parser, provisional, superseded } = state;
-  let account = state.account;
+  // Read the account again: a sync while the review was open may have
+  // changed it (a bill marked paid on the other device), and saving the copy
+  // from when the review opened would undo that.
+  let account = state.account ? (await getAll('accounts')).find((a) => a.id === state.account.id) || state.account : null;
 
   if (provisional) {
-    if (!account) {
-      showStatus(statusEl, 'Pick the card these belong to first.', true);
-      return;
-    }
     // Digits that belong to this card but aren't its recorded number (a
     // renewed card, say) are remembered, so the next list finds it on its own.
     if (meta.accountLast4 && account.last4 !== meta.accountLast4) {
@@ -615,13 +706,20 @@ async function commit(resultsEl) {
     txCount: rows.length,
     provisional,
   };
+  // The day a list was taken; see listTakenOn.
+  if (provisional) importBatch.takenOn = isoLocal(new Date());
   await put('importBatches', importBatch);
 
+  const existingById = new Map((await getAll('transactions')).map((t) => [t.id, t]));
   let matchedCount = 0;
   let unchanged = 0;
   for (const row of rows) {
     if (row._keepExisting) {
       unchanged++;
+      // The row now belongs to this list, so undoing an older paste can't take
+      // it away, and this list's rows are all in one place.
+      const existing = existingById.get(row._matchedManualId);
+      if (existing && existing.importBatchId !== importBatch.id) await put('transactions', { ...existing, importBatchId: importBatch.id });
       continue;
     }
     if (row._matchedManualId) {
@@ -662,23 +760,42 @@ async function commit(resultsEl) {
 
   const transferCount = await detectTransfers();
 
+  // EMIs on the card: each becomes (or moves forward) a fixed commitment with
+  // its end date, if left ticked in the review.
+  let emiCount = 0;
+  if (account.type === 'card') {
+    const recurring = await getAll('recurring');
+    for (const emi of state.emis || []) {
+      if (!emi.keep) continue;
+      const existing = recurring.find((r) => r.id === emiCommitmentId(account.id, emi));
+      await put('recurring', emiCommitment(account.id, emi, existing));
+      emiCount++;
+    }
+  }
+
   const saved = rows.length - unchanged;
   const parts = [`Saved ${saved} row${saved === 1 ? '' : 's'}`];
   if (unchanged) parts.push(`${unchanged} unchanged`);
   if (matchedCount) parts.push(`${matchedCount} matched entries already in the app`);
   if (superseded && superseded.length) parts.push(`removed ${superseded.length} no longer listed`);
   if (transferCount) parts.push(`flagged ${transferCount} as transfers`);
+  if (emiCount) parts.push(`${emiCount} EMI${emiCount === 1 ? '' : 's'} kept in your fixed commitments`);
   showStatus(statusEl, `${parts.join(' · ')}.`, false);
-  resultsEl.querySelector('#import-commit-btn').disabled = true;
 
   const nextEl = resultsEl.querySelector('#import-next');
+  const skipBtn = resultsEl.querySelector('#import-skip-btn');
+  if (skipBtn) skipBtn.remove();
   if (state.queue && state.queue.length) {
-    const next = state.queue[0];
-    nextEl.innerHTML = `<button type="button" id="import-next-btn" class="btn-primary">Next card${next.last4 ? `: ••${next.last4}` : ''} (${next.rowCount} rows) →</button>`;
+    showNextButton(nextEl, state.queue);
     state = { parser: state.parser, queue: state.queue };
   } else {
     state = null;
   }
+}
+
+function showNextButton(nextEl, queue) {
+  const next = queue[0];
+  nextEl.innerHTML = `<button type="button" id="import-next-btn" class="btn-primary">Next card${next.last4 ? `: ••${next.last4}` : ''} (${next.rowCount} rows) →</button>`;
 }
 
 function shiftDays(isoDate, delta) {

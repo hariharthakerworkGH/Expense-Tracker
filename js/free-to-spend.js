@@ -1,6 +1,8 @@
 import { getAll, getSetting } from './db.js';
 import { bankBalance, cardBillDue, cardOwedThisCycle } from './account-metrics.js';
-import { frequencyOf, toMonthly, nextOccurrence, isoLocal } from './frequency.js';
+import { nextOccurrence, isoLocal } from './frequency.js';
+import { isLiveCommitment, commitmentDueInWindow } from './commitments.js';
+import { looksLikeCardPayment } from './transfers.js';
 
 // The one number the app leads with: how much you can still spend before your
 // bank account runs out, once everything already owed is taken off.
@@ -16,10 +18,25 @@ import { frequencyOf, toMonthly, nextOccurrence, isoLocal } from './frequency.js
 // returned so the screen can show the sum rather than just its answer.
 
 const DAY_MS = 86400000;
+const SALARY_EARLY_DAYS = 7;
+const SALARY_LATE_DAYS = 5;
 
 function addDays(iso, delta) {
   const [y, m, d] = iso.split('-').map(Number);
   return isoLocal(new Date(y, m - 1, d + delta));
+}
+
+function dateOf(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+// The latest payday on or before `iso`, with the day clamped to short months.
+function paydayOnOrBefore(dayOfMonth, iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const clamp = (year, monthIndex) => Math.min(dayOfMonth, new Date(year, monthIndex + 1, 0).getDate());
+  if (clamp(y, m - 1) <= d) return isoLocal(new Date(y, m - 1, clamp(y, m - 1)));
+  return isoLocal(new Date(y, m - 2, clamp(y, m - 2)));
 }
 
 function daysBetweenInclusive(fromIso, toIso) {
@@ -57,27 +74,48 @@ export async function computeFreeToSpend(now = new Date()) {
   if (bank == null) notes.push('Import a bank statement so the app knows your balance.');
 
   // --- Salary and the window ----------------------------------------------
-  let salary = { amount: 0, date: null, counted: false, alreadyIn: false, setUp: false };
+  const bankIds = new Set(bankAccounts.map((a) => a.id));
+  let salary = { amount: 0, date: null, counted: false, alreadyIn: false, late: false, setUp: false };
   let windowEnd;
   if (salaryDay && monthlyIncome) {
     salary.setUp = true;
-    let next = nextOccurrence(salaryDay, now);
-    // Payday itself: if the salary has already landed, it's in the bank
-    // balance - adding it again would count it twice.
-    const landedToday =
-      next === today &&
+    // Salaries land a few days early (payday on a weekend or holiday) or a
+    // day or two late. A big enough credit near a payday is that payday's
+    // salary, and it's already in the bank balance.
+    const landedFor = (payday) =>
       transactions.some(
-        (t) => bankAccounts.some((a) => a.id === t.accountId) && t.date === today && t.direction === 'credit' && !t.isTransfer && t.amount >= monthlyIncome / 2
+        (t) =>
+          bankIds.has(t.accountId) &&
+          t.direction === 'credit' &&
+          !t.isTransfer &&
+          t.amount >= monthlyIncome / 2 &&
+          t.date >= addDays(payday, -SALARY_EARLY_DAYS) &&
+          t.date <= addDays(payday, SALARY_LATE_DAYS) &&
+          t.date <= today
       );
-    if (landedToday) {
-      salary.alreadyIn = true;
-      const following = nextOccurrence(salaryDay, new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
-      windowEnd = addDays(following, -1);
+    const dayAfter = (iso) => nextOccurrence(salaryDay, dateOf(addDays(iso, 1)));
+    const previous = paydayOnOrBefore(salaryDay, today);
+    const next = dayAfter(today);
+
+    // Once a salary is in the bank, the plan moves on to the pay period it
+    // funds and counts the salary after it - whether it landed on the day,
+    // early or late - so the number changes when the money arrives, not on a
+    // date that happens to be on the calendar.
+    if (next <= addDays(today, SALARY_EARLY_DAYS) && landedFor(next)) {
+      const after = dayAfter(next);
+      salary = { ...salary, amount: monthlyIncome, date: after, counted: true, alreadyIn: true };
+      windowEnd = addDays(dayAfter(after), -1);
+    } else if (landedFor(previous)) {
+      salary = { ...salary, amount: monthlyIncome, date: next, counted: true };
+      windowEnd = addDays(dayAfter(next), -1);
+    } else if (today <= addDays(previous, SALARY_LATE_DAYS)) {
+      // Payday was in the last few days and nothing has arrived yet: it's
+      // late, not missing. Count it, and plan only until the next payday.
+      salary = { ...salary, amount: monthlyIncome, date: previous, counted: true, late: true };
+      windowEnd = addDays(next, -1);
     } else {
       salary = { ...salary, amount: monthlyIncome, date: next, counted: true };
-      const [ny, nm, nd] = next.split('-').map(Number);
-      const following = nextOccurrence(salaryDay, new Date(ny, nm - 1, nd + 1));
-      windowEnd = addDays(following, -1);
+      windowEnd = addDays(dayAfter(next), -1);
     }
   } else {
     // Without a salary day there's no pay period to plan to, so plan to the
@@ -88,72 +126,80 @@ export async function computeFreeToSpend(now = new Date()) {
   const daysLeft = Math.max(1, daysBetweenInclusive(today, windowEnd));
 
   // --- Cards --------------------------------------------------------------
-  const cards = cardAccounts.map((account) => {
-    const { owed, cycleStart } = cardOwedThisCycle(account, transactions, importBatches);
-
-    // A billed amount counts as unpaid only after subtracting payments made
-    // since that statement closed. The app often knows a bill was paid (the
-    // CRED or BBPS payment is right there on the card) even if "Mark paid"
-    // was never tapped.
-    const bill = cardBillDue(account);
-    let unpaid = 0;
-    if (bill && !bill.paid) {
-      const paidSince = transactions
-        .filter((t) => t.accountId === account.id && t.isTransfer && t.direction === 'credit' && (!account.statementPeriodEnd || t.date > account.statementPeriodEnd))
-        .reduce((s, t) => s + t.amount, 0);
-      unpaid = Math.max(0, bill.amount - paidSince);
-    }
-
-    const latestList = importBatches
-      .filter((b) => b.accountId === account.id && b.provisional)
-      .sort((a, b) => (a.importedAt < b.importedAt ? 1 : -1))[0];
-    return { account, owed, unpaid, cycleStart, listImportedAt: latestList ? latestList.importedAt : null };
+  // A card bill paid from the bank leaves the bank at once, but the card's
+  // "payment received" only reaches the app with the next list or statement.
+  // Until then the bank-side payment has to count as paying the card, or the
+  // bill is taken off twice: once from the bank balance, once as unpaid.
+  const cardCreditsPaired = new Set();
+  const bankOnlyPayments = transactions.filter((t) => {
+    if (!bankIds.has(t.accountId) || t.direction !== 'debit' || !t.isTransfer || !looksLikeCardPayment(t, 'bank')) return false;
+    const twin = transactions.find(
+      (c) => cardIds.has(c.accountId) && c.direction === 'credit' && c.isTransfer && c.amount === t.amount && !cardCreditsPaired.has(c.id) && Math.abs(dateOf(c.date) - dateOf(t.date)) <= 7 * DAY_MS
+    );
+    if (twin) cardCreditsPaired.add(twin.id);
+    return !twin;
   });
+
+  const cards = cardAccounts.map((account) => {
+    const { owed: owedNet, cycleStart, since } = cardOwedThisCycle(account, transactions, importBatches);
+    const bill = cardBillDue(account);
+    const credits = transactions
+      .filter((t) => t.accountId === account.id && t.isTransfer && t.direction === 'credit' && (!since || t.date > since))
+      .reduce((s, t) => s + t.amount, 0);
+    return { account, owedNet, cycleStart, since, bill, credits };
+  });
+
+  // Hand each bank-only payment to the card it paid: the card's digits in the
+  // bank's description first, otherwise the one card whose bill it equals.
+  for (const p of bankOnlyPayments) {
+    const desc = p.rawDescription || '';
+    const candidates = cards.filter((c) => !c.since || p.date > c.since);
+    let target = candidates.find((c) => [c.account.last4, ...(c.account.linkedLast4s || [])].filter(Boolean).some((d) => desc.includes(d)));
+    if (!target) {
+      const byAmount = candidates.filter((c) => c.bill && !c.bill.paid && c.bill.amount === p.amount);
+      if (byAmount.length === 1) target = byAmount[0];
+    }
+    if (target) target.credits += p.amount;
+  }
+
+  for (const c of cards) {
+    // Payments since the last statement first settle that statement's bill,
+    // and anything beyond it comes off what's owed since. Once the bill is
+    // marked paid, the first payments are taken to be the ones that paid it.
+    const billed = c.bill && !c.bill.paid ? c.bill.amount : 0;
+    const payments = c.bill && c.bill.paid ? Math.max(0, c.credits - c.bill.amount) : c.credits;
+    const total = Math.max(0, billed + c.owedNet - payments);
+    c.unpaid = Math.min(total, Math.max(0, billed - payments));
+    c.owed = total - c.unpaid;
+    const latestList = importBatches
+      .filter((b) => b.accountId === c.account.id && b.provisional)
+      .sort((a, b) => (a.importedAt < b.importedAt ? 1 : -1))[0];
+    c.listImportedAt = latestList ? latestList.importedAt : null;
+    // A statement day has passed since the last imported statement.
+    c.statementMissing = Boolean(c.cycleStart && c.since && c.cycleStart > c.since);
+    delete c.credits;
+    delete c.owedNet;
+  }
 
   for (const c of cards) {
     if (c.owed === 0 && c.unpaid === 0) continue;
     if (!c.listImportedAt) {
       notes.push(`${c.account.label}: no current transactions list yet — only entries and alerts you've saved are counted.`);
     }
+    if (c.statementMissing) {
+      notes.push(`${c.account.label}: its statement day has passed. Import the new statement so the bill and its due date are exact.`);
+    }
   }
 
   // --- Commitments paid from the bank -------------------------------------
+  // Charged to a card, a commitment shows up in what the card owes, so only
+  // bank-paid ones are taken off here - and only what hasn't gone out yet.
+  const bankEntries = transactions.filter((t) => bankIds.has(t.accountId) && t.direction === 'debit');
   const commitments = [];
   for (const item of recurring) {
-    if (item.source !== 'fixed' || item.active === false) continue;
-    // Charged to a card: it will show up in what the card owes.
+    if (!isLiveCommitment(item, today)) continue;
     if (item.accountId && cardIds.has(item.accountId)) continue;
-
-    const freq = frequencyOf(item);
-    let amount = 0;
-    let detail = '';
-    if (freq === 'monthly') {
-      let count = 0;
-      let due = nextOccurrence(item.dayOfMonth, now);
-      const dates = [];
-      while (due && due <= windowEnd) {
-        count++;
-        dates.push(due);
-        const [y, m, d] = due.split('-').map(Number);
-        due = nextOccurrence(item.dayOfMonth, new Date(y, m - 1, d + 1));
-      }
-      amount = item.amount * count;
-      detail = dates.length ? `due ${dates.map((d) => shortDate(d)).join(', ')}` : '';
-    } else if (freq === 'daily') {
-      amount = item.amount * daysLeft;
-      detail = `${daysLeft} days`;
-    } else if (freq === 'weekly') {
-      amount = Math.round(item.amount * (daysLeft / 7));
-      detail = `about ${Math.round(daysLeft / 7)} weeks`;
-    } else if (freq === 'fortnightly') {
-      amount = Math.round(item.amount * (daysLeft / 14));
-      detail = `about ${Math.round(daysLeft / 14)} fortnights`;
-    } else {
-      // Quarterly, half-yearly, yearly: the month it falls in isn't known, so
-      // it's spread evenly - set aside a slice for every day in the window.
-      amount = Math.round(toMonthly(item.amount, freq) * (daysLeft / (365 / 12)));
-      detail = 'set aside, spread over the year';
-    }
+    const { amount, detail } = commitmentDueInWindow(item, { today, windowEnd, bankEntries });
     if (amount > 0) commitments.push({ label: item.label, amount, detail });
   }
 
@@ -176,9 +222,4 @@ export async function computeFreeToSpend(now = new Date()) {
     perDay: free != null && free > 0 ? Math.floor(free / daysLeft) : 0,
     notes,
   };
-}
-
-function shortDate(iso) {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 }

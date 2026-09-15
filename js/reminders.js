@@ -2,6 +2,7 @@ import { getAll, getSetting, setSetting } from './db.js';
 import { cardBillDue } from './account-metrics.js';
 import { formatCurrency } from './format.js';
 import { frequencyOf, hasDueDate, nextOccurrence } from './frequency.js';
+import { isLiveCommitment } from './commitments.js';
 
 // Bill reminders without a server.
 //
@@ -97,11 +98,12 @@ export async function refreshSchedule() {
 
   const today = new Date();
   for (const r of recurring) {
-    if (r.source !== 'fixed' || r.active === false) continue;
+    if (!isLiveCommitment(r)) continue;
     // Reminding you daily that you buy chai daily helps nobody - only things
     // that fall due on a particular date are worth a notification.
-    if (!hasDueDate(frequencyOf(r))) continue;
+    if (!hasDueDate(frequencyOf(r)) || r.spread) continue;
     const due = nextOccurrence(r.dayOfMonth, today);
+    if (r.endDate && due > r.endDate) continue;
     schedule.push({
       id: `fixed-${r.id}-${due}`,
       title: `${r.label} is due`,

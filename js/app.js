@@ -134,6 +134,13 @@ const SAFE_TO_REFRESH = new Set(['summary', 'accounts', 'coach', 'recap', 'categ
 let pushTimer = null;
 let syncing = false;
 
+function typingInView() {
+  const view = document.getElementById('view-container');
+  if (!view) return false;
+  if (view.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return true;
+  return [...view.querySelectorAll('input:not([type=checkbox]):not([type=radio]), textarea')].some((el) => el.value !== el.defaultValue);
+}
+
 async function runSync({ silent = true } = {}) {
   if (syncing) return;
   const [{ configured }, passphrase] = await Promise.all([getSyncConfig(), getSyncPassphrase()]);
@@ -152,7 +159,9 @@ async function runSync({ silent = true } = {}) {
     // an amount on Add, an account picked for an alert, a whole statement
     // waiting for review on Import. Only screens with nothing to lose are
     // refreshed; the rest pick the changes up the next time they open.
-    if ((added || updated || deleted) && SAFE_TO_REFRESH.has(currentView)) await showView(currentView, {}, true);
+    // Cards and Coach have small forms too (a statement day, "can I afford
+    // this?"), so they're skipped while something on them has been typed into.
+    if ((added || updated || deleted) && SAFE_TO_REFRESH.has(currentView) && !typingInView()) await showView(currentView, {}, true);
   } catch (err) {
     setSyncIndicator('error', err.message);
   } finally {

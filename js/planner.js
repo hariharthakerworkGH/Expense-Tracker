@@ -2,6 +2,7 @@ import { getAll, getSetting } from './db.js';
 import { spendByCategoryForMonth, monthStartISO, getBudgets, cycleAwareEnabled } from './budgets.js';
 import { currentMonthKey, previousMonthKey } from './spending-month.js';
 import { monthlyAmountOf, yearlyAmountOf } from './frequency.js';
+import { isLiveCommitment } from './commitments.js';
 
 // The planning engine.
 //
@@ -26,7 +27,7 @@ export async function financialSnapshot(now = new Date()) {
     cycleAwareEnabled(),
   ]);
 
-  const fixed = recurring.filter((r) => r.source === 'fixed' && r.active !== false);
+  const fixed = recurring.filter((r) => isLiveCommitment(r));
   const fixedMonthly = fixed.reduce((s, r) => s + monthlyAmountOf(r), 0);
   const fixedCategoryIds = new Set(fixed.map((r) => r.categoryId).filter(Boolean));
 

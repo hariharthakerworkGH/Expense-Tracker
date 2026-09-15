@@ -27,6 +27,19 @@ const DATE_LINE_RE = /^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct
 const AMOUNT_LINE_RE = /^₹\s*([\d,]+(?:\.\d{1,2})?)\s*(credit|debit)\s+icon\s*$/i;
 // A heading: text ending in exactly four digits, seen between transactions.
 const HEADING_RE = /^(?=.*[A-Za-z]).*?(\d{4})\s*$/;
+// Page text that also ends in four digits but is a date or a year, not a card:
+// "Unbilled transactions as on 14 Sep 2026", "© HDFC Bank 2026".
+const DATED_LINE_RE = /((Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?,?\s+\d{4}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})\s*$|©/i;
+const CARD_CUE_RE = /(card|x{2,}|\*{2,}|•{2,}|ending)\W{0,6}\d{4}\s*$/i;
+
+function headingDigits(line) {
+  const m = line.match(HEADING_RE);
+  if (!m || DATED_LINE_RE.test(line)) return null;
+  // A year-like number counts only when it plainly follows the word "card"
+  // or masked digits.
+  if (/^(19|20)\d{2}$/.test(m[1]) && !CARD_CUE_RE.test(line)) return null;
+  return m[1];
+}
 // Labels HDFC prints under a merchant that aren't part of its name.
 const LABEL_LINE_RE = /^(ELIGIBLE FOR SMARTEMI|CONVERT TO EMI|EMI AVAILABLE)$/i;
 
@@ -58,10 +71,10 @@ export function splitSections(text) {
     // Only a line sitting between transactions can be a heading. Inside a
     // transaction, a description like "Upi-tfs 90310077 Kol Banchhar" also
     // ends in digits and must not be mistaken for one.
-    const heading = expectingDate ? line.match(HEADING_RE) : null;
-    if (heading) {
+    const digits = expectingDate ? headingDigits(line) : null;
+    if (digits) {
       if (current.lines.length) sections.push(current);
-      current = { last4: heading[1], heading: line, lines: [] };
+      current = { last4: digits, heading: line, lines: [] };
       continue;
     }
     current.lines.push(line);

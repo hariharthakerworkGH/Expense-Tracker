@@ -1,4 +1,6 @@
-import { getAll, put, getSetting, setSetting } from '../db.js';
+import { getAll, put, getSetting, setSetting, newId } from '../db.js';
+import { isFixed, isLiveCommitment, coveredByFixed } from '../commitments.js';
+import { isoLocal, hasDueDate, frequencyOf } from '../frequency.js';
 import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
 import { cardBillDue } from '../account-metrics.js';
 import { computeFreeToSpend } from '../free-to-spend.js';
@@ -102,13 +104,22 @@ function renderFreeToSpend(accounts, fts) {
           ${line('In your bank', fts.bank, '+', fts.bankLines.map((l) => `as of ${formatDateNice(l.asOf)}${l.entriesSince ? ` + ${l.entriesSince} entr${l.entriesSince === 1 ? 'y' : 'ies'} since` : ''}`).join(' · '))}
           ${
             fts.salary.counted
-              ? line('Salary', fts.salary.amount, '+', `on ${formatDateNice(fts.salary.date)}`)
+              ? line('Salary', fts.salary.amount, '+', fts.salary.late ? `due ${formatDateNice(fts.salary.date)}, not in yet` : `on ${formatDateNice(fts.salary.date)}`)
               : fts.salary.alreadyIn
-                ? '<div class="totals-row"><span>Salary<br><span class="muted-note">already in your bank today</span></span><span class="muted">—</span></div>'
+                ? `<div class="totals-row"><span>Salary<br><span class="muted-note">the ${formatDateNice(fts.salary.date)} salary is already in your bank</span></span><span class="muted">—</span></div>`
                 : ''
           }
           ${unpaidCards.map((c) => line(`${escapeHtml(c.account.label)} bill`, c.unpaid, '-', 'billed, not paid yet')).join('')}
-          ${owedCards.map((c) => line(escapeHtml(c.account.label), c.owed, c.owed < 0 ? '+' : '-', c.listImportedAt ? `this cycle · list from ${formatDateNice(c.listImportedAt)}` : 'this cycle · from saved entries only')).join('')}
+          ${owedCards
+            .map((c) =>
+              line(
+                escapeHtml(c.account.label),
+                c.owed,
+                '-',
+                `${c.statementMissing ? 'since the last imported statement' : 'this cycle'} · ${c.listImportedAt ? `list from ${formatDateNice(c.listImportedAt)}` : 'from saved entries only'}`
+              )
+            )
+            .join('')}
           ${fts.commitments.map((c) => line(escapeHtml(c.label), c.amount, '-', c.detail)).join('')}
           <div class="totals-row net"><span>Free to spend</span><span>${formatSignedCurrency(fts.free)}</span></div>
         </div>
@@ -272,36 +283,70 @@ async function renderUpcoming(container) {
   const el = container.querySelector('#upcoming-section');
   if (!el) return;
 
-  const [detected, categories] = await Promise.all([detectRecurring(), getAll('categories')]);
-  if (detected.length === 0) {
+  const [found, categories, recurring, accounts] = await Promise.all([detectRecurring(), getAll('categories'), getAll('recurring'), getAll('accounts')]);
+  const today = isoLocal(new Date());
+  // Your fixed commitments first, then what the app has spotted that isn't
+  // one of them yet. Spotted items can be made fixed from here.
+  const fixed = recurring.filter((r) => isLiveCommitment(r, today) && hasDueDate(frequencyOf(r)) && !r.spread);
+  const detected = found.filter((d) => !coveredByFixed(d, recurring.filter(isFixed)));
+  if (detected.length === 0 && fixed.length === 0) {
     el.innerHTML = '';
     return;
   }
 
-  const withDueDates = detected
-    .map((r) => ({ ...r, due: nextDueDate(r.dayOfMonth) }))
-    .sort((a, b) => (a.due < b.due ? -1 : 1));
+  const rows = [
+    ...fixed.map((r) => ({ ...r, isFixedItem: true, due: nextDueDate(r.dayOfMonth) })).filter((r) => !r.endDate || r.due <= r.endDate),
+    ...detected.map((r) => ({ ...r, due: nextDueDate(r.dayOfMonth) })),
+  ].sort((a, b) => (a.due < b.due ? -1 : 1));
 
   const catName = (id) => categories.find((c) => c.id === id)?.name;
+  const accountName = (id) => accounts.find((a) => a.id === id)?.label;
 
   el.innerHTML = `
     <h3>Upcoming</h3>
     <div class="totals-card">
-      ${withDueDates
+      ${rows
         .map(
           (r) => `
         <div class="upcoming-row">
           <div class="attention-row">
-            <span>${escapeHtml(r.label)}${catName(r.categoryId) ? ` <span class="muted-note">(${escapeHtml(catName(r.categoryId))})</span>` : ''}<br><span class="muted-note">due ${formatDateNice(r.due)}</span></span>
+            <span>${escapeHtml(r.label)}${catName(r.categoryId) ? ` <span class="muted-note">(${escapeHtml(catName(r.categoryId))})</span>` : ''}<br><span class="muted-note">due ${formatDateNice(r.due)}${
+              r.isFixedItem ? ` · fixed${r.emi ? ` · ${r.emi.current} of ${r.emi.total}` : ''}` : accountName(r.accountId) ? ` · ${escapeHtml(accountName(r.accountId))}` : ''
+            }</span></span>
             <span class="out">${formatCurrency(r.amount)}</span>
           </div>
-          <button type="button" class="icon-btn recurring-dismiss" data-id="${r.id}">Not recurring</button>
+          ${
+            r.isFixedItem
+              ? ''
+              : `<button type="button" class="btn-tiny primary recurring-make-fixed" data-id="${r.id}">Make it a fixed commitment</button>
+                 <button type="button" class="icon-btn recurring-dismiss" data-id="${r.id}">Not recurring</button>`
+          }
         </div>
       `
         )
         .join('')}
     </div>
   `;
+
+  el.querySelectorAll('.recurring-make-fixed').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const d = detected.find((r) => r.id === btn.dataset.id);
+      await put('recurring', {
+        id: `fixed-${newId()}`,
+        label: d.label,
+        amount: d.amount,
+        frequency: 'monthly',
+        dayOfMonth: d.dayOfMonth,
+        categoryId: d.categoryId,
+        accountId: d.accountId,
+        active: true,
+        source: 'fixed',
+        fromRecurringId: d.id,
+      });
+      showToast('Added to your fixed commitments on Plan');
+      renderUpcoming(container);
+    });
+  });
 
   el.querySelectorAll('.recurring-dismiss').forEach((btn) => {
     btn.addEventListener('click', async () => {

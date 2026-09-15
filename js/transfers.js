@@ -16,8 +16,21 @@ export async function detectTransfers() {
   const cardCredits = auto.filter((t) => !t.isTransfer && t.direction === 'credit' && accountType.get(t.accountId) === 'card');
 
   const updates = [];
+  const cardDigits = new Map(accounts.map((a) => [a.id, [a.last4, ...(a.linkedLast4s || [])].filter(Boolean)]));
   for (const debit of payingDebits) {
-    const match = cardCredits.find((credit) => credit.amount === debit.amount && !credit._claimed && daysApart(debit.date, credit.date) <= MAX_DAYS_APART);
+    // Same amount a few days apart isn't enough on its own: a ₹1,299 refund on
+    // the card and a ₹1,299 UPI payment to a friend would pair up and both
+    // vanish from spending. One side has to read like a card payment, or the
+    // bank's line has to name the card.
+    const match = cardCredits.find(
+      (credit) =>
+        credit.amount === debit.amount &&
+        !credit._claimed &&
+        daysApart(debit.date, credit.date) <= MAX_DAYS_APART &&
+        (looksLikeCardPayment(credit, 'card') ||
+          looksLikeCardPayment(debit, 'bank') ||
+          (cardDigits.get(credit.accountId) || []).some((d) => (debit.rawDescription || '').includes(d)))
+    );
     if (match) {
       match._claimed = true;
       debit.isTransfer = true;
@@ -50,9 +63,11 @@ export async function detectTransfers() {
 // bill payments. "BBPS" alone is not enough - electricity and gas go through
 // BBPS too - so it only counts alongside an explicit card-payment phrase.
 const PAYMENT_OUT_RE = /\b(CRED\b|CRED\.CLUB|CC\s*PAYMENT|CREDIT\s*CARD\s*(BILL\s*)?(PAYMENT|PMT)|PAYMENT\s*ON\s*CRED)/i;
-const PAYMENT_IN_RE = /\b(PAYMENT\s*RECEIVED|CC\s*PAYMENT|BPPY\s*CC|CRED\b|AUTOPAY\s*RECEIVED)/i;
+// On the card side a credit sent by bank transfer can only be a payment -
+// refunds come back from the merchant - so NEFT/IMPS/NetBanking count too.
+const PAYMENT_IN_RE = /\b(PAYMENT\s*RECEIVED|CC\s*PAYMENT|BPPY\s*CC|CRED\b|AUTOPAY\s*RECEIVED|NET\s*BANKING\s*(TRANSFER|PAYMENT)|PAYMENT\s*-?\s*THANK\s*YOU|BBPS|NEFT|IMPS)/i;
 
-function looksLikeCardPayment(t, type) {
+export function looksLikeCardPayment(t, type) {
   const desc = t.rawDescription || '';
   if (type === 'card') return t.direction === 'credit' && PAYMENT_IN_RE.test(desc);
   return t.direction === 'debit' && PAYMENT_OUT_RE.test(desc);
