@@ -343,6 +343,30 @@ code {
   background: var(--warn);
 }
 
+/* The bank's spending power, under the cards hero. */
+.bank-power {
+  margin: -6px 0 18px;
+}
+
+.bank-power .hero-split {
+  margin-top: 12px;
+}
+
+.bank-power-amount {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 4px 0 6px;
+}
+
+.bank-power.level-warning {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+}
+
+.bank-power.level-over {
+  border-color: color-mix(in srgb, var(--out) 60%, var(--border));
+}
+
 /* The spending hero's border turns amber, then red, as the limit gets close. */
 .hero.level-warning {
   border-color: color-mix(in srgb, var(--warn) 55%, var(--border-hi));

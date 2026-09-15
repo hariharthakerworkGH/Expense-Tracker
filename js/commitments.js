@@ -130,10 +130,7 @@ export function commitmentDueInWindow(item, { today, windowEnd, bankEntries, who
     const dues = [];
     let due = nextOccurrence(item.dayOfMonth, dateOf(addDays(today, -LATE_DAYS)));
     while (due && due <= last) {
-      const paid = bankEntries
-        .filter((t) => t.date >= addDays(due, -EARLY_DAYS) && t.date <= addDays(due, LATE_DAYS) && t.date <= today)
-        .filter((t) => (matcher ? matcher(t) : Math.abs(t.amount - item.amount) <= item.amount * 0.02))
-        .reduce((s, t) => s + t.amount, 0);
+      const paid = paidTowards(item, matcher, due, bankEntries, today);
       const stillOwed = paid >= item.amount * 0.9 ? 0 : Math.max(0, item.amount - paid);
       // A date already past only counts while it's inside the grace period.
       if (stillOwed > 0 && (due >= today || due >= addDays(today, -LATE_DAYS))) {
@@ -153,6 +150,20 @@ export function commitmentDueInWindow(item, { today, windowEnd, bankEntries, who
   // Quarterly, half-yearly, yearly: the month it falls in isn't known, so a
   // slice is set aside for every day in the window.
   return { amount: Math.round(toMonthly(item.amount, freq) * (span / (365 / 12))), detail: 'set aside, spread over the year' };
+}
+
+// What has gone out towards one due date: payments naming the commitment, or
+// of about its amount, from EARLY_DAYS before it to LATE_DAYS after, up to today.
+function paidTowards(item, matcher, due, entries, today) {
+  return entries
+    .filter((t) => t.date >= addDays(due, -EARLY_DAYS) && t.date <= addDays(due, LATE_DAYS) && t.date <= today)
+    .filter((t) => (matcher ? matcher(t) : Math.abs(t.amount - item.amount) <= item.amount * 0.02))
+    .reduce((s, t) => s + t.amount, 0);
+}
+
+// True when a due date has in effect already been paid.
+export function paidAround(item, due, entries, today) {
+  return paidTowards(item, entryMatcher(item), due, entries, today) >= item.amount * 0.9;
 }
 
 function dateOf(iso) {

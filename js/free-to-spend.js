@@ -1,26 +1,32 @@
 import { getAll, getSetting } from './db.js';
 import { bankBalance, cardBillDue, cardOwedThisCycle, cardPosition } from './account-metrics.js';
-import { nextOccurrence, isoLocal } from './frequency.js';
-import { isLiveCommitment, commitmentDueInWindow } from './commitments.js';
+import { nextOccurrence, isoLocal, frequencyOf } from './frequency.js';
+import { isLiveCommitment, commitmentDueInWindow, paidAround } from './commitments.js';
 import { looksLikeCardPayment } from './transfers.js';
 
-// The one number the app leads with: how much more can go on your cards (or
-// out by UPI) in this card cycle, so that once the salary lands, the fixed
-// commitments go out and this cycle's card bills are paid, the bank still
-// holds what you asked it to keep.
+// Your spending power, in the two places you spend from.
 //
-// This cycle's card spends are billed on the statement day (the 25th) and
-// paid from the salary that follows it. So:
-//
+// BANK - safe to spend by UPI until the salary lands:
 //   bank balance now
-// + salaries still to come, up to the one that pays this cycle's bills
-// − card bills already billed and not yet paid
-// − fixed commitments paid from the bank until that salary's month is over
-//   (its whole month - every commitment comes out of that salary)
+// − bank-paid commitments still to go out before the salary
+// − card bills billed and due before the salary
+//
+// CARDS - left to spend until the statement day. This cycle's card spends are
+// billed on the statement day and paid from the salary that follows, which
+// also has to cover that month's commitments:
+//   the coming salary (every salary up to the one that pays this cycle)
+// − the bank-paid commitments of the month each of those salaries pays for
+// − card bills already cut that the salary pays
 // − what you want left in the bank
-// = spending limit for this card cycle
+// = card limit for this cycle
 // − spent on cards so far this cycle (refunds and cashback taken off)
-// = left to spend
+// − card-paid commitments still to be charged this cycle
+// = left to spend on cards
+//
+// The two meet on bills day: bank money not spent by UPI is still in the
+// account when the salary lands, so bank + cards + what you keep is the
+// balance left once everything is paid. Commitments paid in cash come out
+// of the ATM money and aren't counted again.
 //
 // Every line is returned so the screen can show the sum, not just its answer.
 
@@ -136,6 +142,8 @@ export async function computeFreeToSpend(now = new Date()) {
     const billsPayday = cycleClose ? nextOccurrence(salaryDay, dateOf(cycleClose)) : first;
     for (let d = first; d <= billsPayday; d = dayAfter(d)) salary.dates.push(d);
     salary.billsPayday = billsPayday;
+    salary.nextUnreceived = first;
+    salary.dayAfter = dayAfter;
     salary.amount = monthlyIncome * salary.dates.length;
     salary.counted = salary.dates.length > 0;
     salary.date = salary.dates[0] || null;
@@ -235,39 +243,110 @@ export async function computeFreeToSpend(now = new Date()) {
     }
   }
 
-  // --- Commitments paid from the bank -------------------------------------
-  // Charged to a card, a commitment shows up in what the card owes, so only
-  // bank-paid ones are taken off here - and only what hasn't gone out yet.
+  // --- Commitments, by what pays them -------------------------------------
+  // Bank-paid ones come out of the bank (before salary) or out of a salary
+  // (the month it pays for). Card-paid ones are card spending, so they're
+  // reserved inside this card cycle until they show up on the card. Cash ones
+  // come out of the ATM money, which is its own commitment.
+  const cashIds = new Set(accounts.filter((a) => a.type === 'cash').map((a) => a.id));
+  const paidBy = (item) => {
+    if (item.accountId === 'cash' || cashIds.has(item.accountId)) return 'cash';
+    if (item.accountId && cardIds.has(item.accountId)) return 'card';
+    return 'bank';
+  };
+  const live = recurring.filter((item) => isLiveCommitment(item, today));
   const bankEntries = transactions.filter((t) => bankIds.has(t.accountId) && t.direction === 'debit');
-  const commitments = [];
-  for (const item of recurring) {
-    if (!isLiveCommitment(item, today)) continue;
-    if (item.accountId && cardIds.has(item.accountId)) continue;
-    const { amount, detail } = commitmentDueInWindow(item, { today, windowEnd, bankEntries, wholeMonths: true });
-    if (amount > 0) commitments.push({ label: item.label, amount, detail });
+  const keep = Math.max(0, Number(keepInBank) || 0);
+  const firstSalary = salary.setUp ? salary.dates[0] || salary.nextUnreceived : null;
+  const spendEnd = cycleClose || windowEnd;
+
+  // Before the next salary lands, from the bank.
+  const beforeSalaryEnd = firstSalary ? addDays(firstSalary, -1) : windowEnd;
+  const bankBeforeSalary = [];
+  for (const item of live.filter((i) => paidBy(i) === 'bank')) {
+    if (beforeSalaryEnd < today) break;
+    const { amount, detail } = commitmentDueInWindow(item, { today, windowEnd: beforeSalaryEnd, bankEntries });
+    if (amount > 0) bankBeforeSalary.push({ label: item.label, amount, detail });
   }
 
+  // Each salary still to come, and the month of commitments it pays for.
+  const fundedMonths = salary.dates.map((payday) => {
+    const end = addDays(salary.dayAfter(payday), -1);
+    const items = [];
+    for (const item of live.filter((i) => paidBy(i) === 'bank')) {
+      const { amount, detail } = commitmentForMonth(item, payday, end, bankEntries, today);
+      if (amount > 0) items.push({ label: item.label, amount, detail });
+    }
+    return { payday, end, amount: monthlyIncome, commitments: items, total: items.reduce((s, c) => s + c.amount, 0) };
+  });
+
+  // Card-paid commitments not yet charged in this cycle.
+  const cardUpcoming = [];
+  for (const item of live.filter((i) => paidBy(i) === 'card')) {
+    const entries = transactions.filter((t) => t.accountId === item.accountId && t.direction === 'debit');
+    const { amount, detail } = commitmentDueInWindow(item, { today, windowEnd: spendEnd, bankEntries: entries });
+    const card = cardAccounts.find((a) => a.id === item.accountId);
+    if (amount > 0) cardUpcoming.push({ label: item.label, amount, detail: `${card ? card.label : 'card'} · ${detail}` });
+  }
+
+  // Card bills: a billed statement due before the salary has to be paid from
+  // the bank; everything else on the cards is paid from the salary.
+  const billsBeforeSalary = [];
+  const cardBills = [];
+  for (const c of cards) {
+    const statementPart = c.unpaid - (c.billedNotImported || 0);
+    const due = c.account.statementDueDate;
+    if (statementPart > 0 && firstSalary && due && due < firstSalary) {
+      billsBeforeSalary.push({ label: `${c.account.label} bill`, amount: statementPart, detail: `due ${formatShort(due)}` });
+      if (c.billedNotImported) cardBills.push({ label: `${c.account.label} bill`, amount: c.billedNotImported, detail: 'billed, statement not imported yet' });
+    } else if (c.unpaid > 0) {
+      cardBills.push({ label: `${c.account.label} bill`, amount: c.unpaid, detail: c.billedNotImported ? 'billed, statement not imported yet' : 'billed, not paid yet' });
+    }
+  }
+
+  const sum = (list) => list.reduce((s, x) => s + x.amount, 0);
   const owedCards = cards.reduce((s, c) => s + c.owed, 0);
   const unpaidBills = cards.reduce((s, c) => s + c.unpaid, 0);
-  const commitmentsTotal = commitments.reduce((s, c) => s + c.amount, 0);
-  const keep = Math.max(0, Number(keepInBank) || 0);
-  const limit = bank == null ? null : bank + salary.amount - unpaidBills - commitmentsTotal - keep;
-  const free = limit == null ? null : limit - owedCards;
+  const upcomingTotal = sum(cardUpcoming);
+  const setUp = bank != null && salary.setUp;
 
-  // --- How close to the limit ---------------------------------------------
-  const spendEnd = cycleClose || windowEnd;
+  // The bank: what's safe to spend by UPI until the salary lands.
+  let bankSafe = setUp ? bank - sum(bankBeforeSalary) - sum(billsBeforeSalary) : null;
+  // The cards: what the coming salaries can pay once their months'
+  // commitments are covered, less the bills already cut and what you keep.
+  const shared = setUp && fundedMonths.length === 0;
+  let limit = null;
+  if (setUp) {
+    limit = shared
+      ? bankSafe - sum(cardBills) - keep // the salary that pays these bills is already in the bank
+      : fundedMonths.reduce((s, m) => s + m.amount - m.total, 0) - sum(cardBills) - keep;
+  }
+  const free = limit == null ? null : limit - owedCards - upcomingTotal;
+  // Cards over what the salary can pay can only be paid with money already
+  // in the bank - so that money isn't free to spend by UPI.
+  const bankBeforeCards = bankSafe;
+  const cardShortfall = setUp && !shared && free < 0 ? -free : 0;
+  if (shared) bankSafe = free;
+  else if (setUp) bankSafe -= cardShortfall;
+  // If nothing more is spent: the bank balance once the salary is in and the
+  // commitments and card bills are paid.
+  const afterBills = !setUp ? null : shared ? free + keep : bankBeforeCards + free + keep;
+
+  // --- How close to the limits --------------------------------------------
   const daysToClose = Math.max(1, daysBetweenInclusive(today, spendEnd));
+  const daysToSalary = Math.max(1, daysBetweenInclusive(today, beforeSalaryEnd));
   const daysIntoCycle = cycleStart ? Math.max(1, daysBetweenInclusive(cycleStart, today)) : null;
   const pace = daysIntoCycle ? Math.round(Math.max(0, owedCards) / daysIntoCycle) : 0;
   // At the pace of this cycle so far, the day the limit would be crossed. The
   // first few days of a cycle are too few to judge a pace by.
   const crossesOn = free != null && free > 0 && pace > 0 && daysIntoCycle >= MIN_DAYS_FOR_PACE ? addDays(today, Math.floor(free / pace)) : null;
-  const used = limit > 0 ? owedCards / limit : 1;
+  const used = limit > 0 ? (owedCards + upcomingTotal) / limit : 1;
   let level = 'ok';
   if (free == null) level = 'unknown';
-  else if (free < 0) level = 'over';
+  else if (free < 0) level = bankSafe >= 0 && !shared ? 'critical' : 'over';
   else if (used >= CRITICAL_SHARE || (crossesOn && crossesOn <= addDays(today, 3))) level = 'critical';
   else if (used >= WARNING_SHARE || (crossesOn && crossesOn <= spendEnd)) level = 'warning';
+  const bankLevel = bankSafe == null ? 'unknown' : bankSafe < 0 ? 'over' : bankSafe < BANK_LOW ? 'warning' : 'ok';
 
   return {
     today,
@@ -281,9 +360,20 @@ export async function computeFreeToSpend(now = new Date()) {
     bankLines,
     salary,
     cards,
-    commitments,
     keep,
-    totals: { owedCards, unpaidBills, commitments: commitmentsTotal },
+    // bank until salary
+    beforeSalaryEnd,
+    daysToSalary,
+    bankBeforeSalary,
+    billsBeforeSalary,
+    bankSafe,
+    cardShortfall,
+    bankPerDay: bankSafe != null && bankSafe > 0 ? Math.floor(bankSafe / daysToSalary) : 0,
+    bankLevel,
+    // cards this cycle
+    fundedMonths,
+    cardBills,
+    cardUpcoming,
     limit,
     spentThisCycle: owedCards,
     free,
@@ -292,8 +382,35 @@ export async function computeFreeToSpend(now = new Date()) {
     crossesOn: crossesOn && crossesOn <= spendEnd ? crossesOn : null,
     used,
     level,
+    shared,
+    afterBills,
+    totals: { owedCards, unpaidBills, upcoming: upcomingTotal },
     notes,
   };
+}
+
+// Below this, the bank gets an amber warning: ₹5,000.
+const BANK_LOW = 500000;
+
+// A bank-paid commitment in the month a salary pays for (payday to the day
+// before the next one). A spread one counts in full. A dated one counts on
+// each due date in the month, unless it has already been paid early.
+function commitmentForMonth(item, from, to, bankEntries, today) {
+  if (frequencyOf(item) !== 'monthly') return commitmentDueInWindow(item, { today: from, windowEnd: to, bankEntries, wholeMonths: true });
+  if (item.spread) return { amount: item.amount, detail: 'through the month' };
+  let amount = 0;
+  const dues = [];
+  for (let due = nextOccurrence(item.dayOfMonth, dateOf(from)); due && due <= to; due = nextOccurrence(item.dayOfMonth, dateOf(addDays(due, 1)))) {
+    if (item.endDate && due > item.endDate) break;
+    if (paidAround(item, due, bankEntries, today)) continue;
+    amount += item.amount;
+    dues.push(formatShort(due));
+  }
+  return { amount, detail: dues.length ? `due ${dues.join(', ')}` : '' };
+}
+
+function formatShort(iso) {
+  return dateOf(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 }
 
 // Warn at three quarters of the limit, and call it critical at 90%.

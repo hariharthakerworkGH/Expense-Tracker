@@ -72,7 +72,7 @@ function heroTemplate(snapshot) {
   const pct = c.free > 0 ? Math.min(100, Math.round((projected / c.free) * 100)) : 100;
   return `
     <div class="hero level-${c.level}">
-      <p class="hero-label">Left to spend until ${formatDateNice(c.cycleClose || c.windowEnd)}</p>
+      <p class="hero-label">💳 Cards · left to spend until ${formatDateNice(c.cycleClose || c.windowEnd)}</p>
       <p class="hero-amount ${c.free < 0 ? 'negative' : ''}">${formatSignedCurrency(c.free)}</p>
       <div class="hero-meter"><div class="hero-meter-fill ${over ? 'over' : ''}" style="width:${pct}%"></div></div>
       <p class="hero-sub">${

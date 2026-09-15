@@ -68,7 +68,7 @@ export async function render(container) {
     ${
       left != null
         ? `<div class="hero">
-            <p class="hero-label">Left to spend until ${until}</p>
+            <p class="hero-label">💳 Cards · left to spend until ${until}</p>
             <p class="hero-amount ${left < 0 ? 'negative' : ''}">${formatSignedCurrency(left)}</p>
             <div class="hero-meter"><div class="hero-meter-fill ${cycle.level === 'ok' ? '' : cycle.level === 'warning' ? 'warn' : 'over'}" style="width:${usedPct}%"></div></div>
             <p class="hero-sub">${
@@ -111,7 +111,7 @@ export async function render(container) {
     </div>
 
     <h3>Fixed monthly commitments</h3>
-    <p class="group-subtitle">EMIs, rent, money you send home, cash you take out - anything that goes out every month however careful you are. Ones paid from your bank are taken off your free-to-spend before they go out. EMIs on your cards are added here when you import the card statement.</p>
+    <p class="group-subtitle">EMIs, rent, money you send home, cash you take out - anything that goes out every month however careful you are. Set "Paid from" on each: bank ones come out of your salary before card bills, card ones are kept aside in your card limit until they're charged, and cash ones come out of your ATM money. EMIs on your cards are added here when you import the card statement.</p>
     ${
       fixed.length
         ? `<div class="totals-card">${fixed
@@ -384,7 +384,7 @@ function fixedRow(f, categories, paidFrom) {
   const parts = [when];
   if (f.emi) parts.push(`instalment ${f.emi.current} of ${f.emi.total}`);
   if (f.endDate) parts.push(`last payment ${formatDateNice(f.endDate)}`);
-  parts.push(paidFrom ? `from ${escapeHtml(paidFrom)}` : 'from your bank');
+  parts.push(f.accountId === 'cash' ? 'in cash, from your ATM money' : paidFrom ? `from ${escapeHtml(paidFrom)}` : 'from your bank');
   if (cat) parts.push(escapeHtml(cat.name));
 
   return `
@@ -437,7 +437,8 @@ function fixedForm(categories, accounts, item) {
       <label class="field">
         <span>Paid from</span>
         <select class="ff-account">
-          <option value="">Bank account</option>
+          <option value="">Bank account (UPI, transfer, auto-debit)</option>
+          <option value="cash" ${selected('cash', v.accountId)}>Cash (from your ATM money)</option>
           ${accounts
             .filter((a) => a.type === 'card')
             .map((a) => `<option value="${a.id}" ${selected(a.id, v.accountId)}>${escapeHtml(a.label)}</option>`)
