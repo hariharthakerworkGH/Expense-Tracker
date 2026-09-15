@@ -1,6 +1,7 @@
 import { getAll, put, remove, newId } from '../db.js';
 import { formatCurrency, formatDateNice, ordinal } from '../format.js';
-import { bankBalance, cardCycleSpend, cardBillDue } from '../account-metrics.js';
+import { bankBalance, cardCycleSpend, cardBillDue, cardPosition } from '../account-metrics.js';
+import { isoLocal } from '../frequency.js';
 
 // null = form closed, 'new' = adding, otherwise the id being edited
 let editing = null;
@@ -192,7 +193,11 @@ function accountCard(account, transactions, importBatches) {
   const acctTxns = transactions.filter((t) => t.accountId === account.id);
 
   if (account.type === 'card') {
-    const { cycleStart, spend: cycleSpend } = cardCycleSpend(account, transactions, importBatches);
+    // Same figure as the Summary: spends this cycle less refunds and cashback.
+    const position = account.billingCycleDay ? cardPosition(account, transactions, importBatches, isoLocal(new Date())) : null;
+    const { cycleStart, spend: fallbackSpend } = cardCycleSpend(account, transactions, importBatches);
+    const cycleSpend = position ? position.owed : fallbackSpend;
+    const since = position ? position.lastClose : cycleStart;
     const bill = cardBillDue(account);
 
     return `
@@ -203,7 +208,9 @@ function accountCard(account, transactions, importBatches) {
         </div>
         ${renderBill(bill, account)}
         <div class="account-secondary">
-          <span class="out">${formatCurrency(cycleSpend)}</span> spent since${cycleStart ? ` ${formatDateNice(cycleStart)}` : ''} — goes on your next bill
+          <span class="out">${formatCurrency(cycleSpend)}</span> spent since${since ? ` ${formatDateNice(since)}` : ''}${
+            position && position.refunds ? ` (after ${formatCurrency(position.refunds)} refunds and cashback)` : ''
+          } — goes on your next bill${position && position.billedNotImported ? `<br>${formatCurrency(position.billedNotImported)} billed on ${formatDateNice(position.lastClose)}, statement not imported yet` : ''}
         </div>
         <div class="account-subrow">
           <span class="muted-note">${account.billingCycleDay ? `Statement day: ${ordinal(account.billingCycleDay)}` : 'No statement day set'}</span>

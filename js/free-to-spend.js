@@ -1,5 +1,5 @@
 import { getAll, getSetting } from './db.js';
-import { bankBalance, cardBillDue, cardOwedThisCycle } from './account-metrics.js';
+import { bankBalance, cardBillDue, cardOwedThisCycle, cardPosition } from './account-metrics.js';
 import { nextOccurrence, isoLocal } from './frequency.js';
 import { isLiveCommitment, commitmentDueInWindow } from './commitments.js';
 import { looksLikeCardPayment } from './transfers.js';
@@ -169,7 +169,7 @@ export async function computeFreeToSpend(now = new Date()) {
     const credits = transactions
       .filter((t) => t.accountId === account.id && t.isTransfer && t.direction === 'credit' && (!since || t.date > since))
       .reduce((s, t) => s + t.amount, 0);
-    return { account, owedNet, cycleStart, since, bill, credits };
+    return { account, owedNet, cycleStart, since, bill, credits, extraPayments: [] };
   });
 
   // Hand each bank-only payment to the card it paid: the card's digits in the
@@ -182,38 +182,47 @@ export async function computeFreeToSpend(now = new Date()) {
       const byAmount = candidates.filter((c) => c.bill && !c.bill.paid && c.bill.amount === p.amount);
       if (byAmount.length === 1) target = byAmount[0];
     }
-    if (target) target.credits += p.amount;
+    if (target) {
+      target.credits += p.amount;
+      target.extraPayments.push(p);
+    }
+  }
+
+  // Cards with a statement day are worked out cycle by cycle, which matches
+  // each payment to the bill it paid. The rest fall back to "everything since
+  // the last imported statement".
+  for (const c of cards) {
+    if (!c.account.billingCycleDay) continue;
+    const p = cardPosition(c.account, transactions, importBatches, today, c.extraPayments);
+    c.owed = p.owed;
+    c.unpaid = p.unpaid + p.billedNotImported;
+    c.billedNotImported = p.billedNotImported;
+    c.refunds = p.refunds;
+    c.statementMissing = p.statementMissing;
+    c.positioned = true;
   }
 
   for (const c of cards) {
-    // Payments since the last statement first settle that statement's bill,
-    // and anything beyond it comes off what's owed since. Once the bill is
-    // marked paid, the first payments are taken to be the ones that paid it.
-    const billed = c.bill && !c.bill.paid ? c.bill.amount : 0;
-    const payments = c.bill && c.bill.paid ? Math.max(0, c.credits - c.bill.amount) : c.credits;
-    const total = Math.max(0, billed + c.owedNet - payments);
-    c.unpaid = Math.min(total, Math.max(0, billed - payments));
-    c.owed = total - c.unpaid;
+    if (!c.positioned) {
+      // Payments since the last statement first settle that statement's bill,
+      // and anything beyond it comes off what's owed since. Once the bill is
+      // marked paid, the first payments are taken to be the ones that paid it.
+      const billed = c.bill && !c.bill.paid ? c.bill.amount : 0;
+      const payments = c.bill && c.bill.paid ? Math.max(0, c.credits - c.bill.amount) : c.credits;
+      const total = Math.max(0, billed + c.owedNet - payments);
+      c.unpaid = Math.min(total, Math.max(0, billed - payments));
+      c.owed = total - c.unpaid;
+      c.billedNotImported = 0;
+      c.statementMissing = false;
+    }
     const latestList = importBatches
       .filter((b) => b.accountId === c.account.id && b.provisional)
       .sort((a, b) => (a.importedAt < b.importedAt ? 1 : -1))[0];
     c.listImportedAt = latestList ? latestList.importedAt : null;
-    // A statement day has passed since the last imported statement.
-    const lastClose = c.account.billingCycleDay ? paydayOnOrBefore(c.account.billingCycleDay, today) : null;
-    c.statementMissing = Boolean(lastClose && c.since && lastClose > c.since);
-    // Until that statement is imported, what was spent before the statement
-    // day is a bill already cut, not spending in the current cycle.
-    c.billedNotImported = 0;
-    if (c.statementMissing) {
-      const current = transactions
-        .filter((t) => t.accountId === c.account.id && !t.isTransfer && t.date > lastClose)
-        .reduce((s, t) => s + (t.direction === 'credit' ? -t.amount : t.amount), 0);
-      c.billedNotImported = Math.max(0, c.owed - Math.max(0, current));
-      c.owed -= c.billedNotImported;
-      c.unpaid += c.billedNotImported;
-    }
     delete c.credits;
     delete c.owedNet;
+    delete c.extraPayments;
+    delete c.positioned;
   }
 
   for (const c of cards) {
@@ -221,8 +230,8 @@ export async function computeFreeToSpend(now = new Date()) {
     if (!c.listImportedAt) {
       notes.push(`${c.account.label}: no current transactions list yet — only entries and alerts you've saved are counted.`);
     }
-    if (c.statementMissing) {
-      notes.push(`${c.account.label}: its statement day has passed. Import the new statement so the bill and its due date are exact.`);
+    if (c.billedNotImported > 0) {
+      notes.push(`${c.account.label}: the bill from its last statement day is estimated from your entries. Import that statement so the amount is exact.`);
     }
   }
 

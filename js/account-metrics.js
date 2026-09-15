@@ -1,4 +1,5 @@
 import { currentCycleStart } from './billing-cycle.js';
+import { nextOccurrence, isoLocal } from './frequency.js';
 
 // A bank account's balance is a snapshot (from the last imported statement)
 // adjusted forward by anything dated after it - transfers included, since
@@ -101,6 +102,146 @@ export function cardOwedThisCycle(account, transactions, importBatches) {
     rows += copies;
   }
   return { cycleStart: currentCycleStart(account, importBatches), since, owed, rows };
+}
+
+// Where a card stands, cycle by cycle - for cards with a statement day.
+//
+// Every spend is placed in the cycle whose statement it lands on. Each
+// closed cycle has a bill: the imported statement's amount when there is
+// one, otherwise what was spent in that cycle. Payments are matched to the
+// oldest bill cut before them. A payment with no bill in the app to settle
+// (it paid a statement from before your data starts) is left out - it must
+// never be taken off this cycle's spending, which is what used to make
+// ₹97,000 of card spends look like ₹12,781.
+//
+// Returns:
+//   unpaid              imported bills not yet paid
+//   billedNotImported   bills cut on the statement day but not imported yet
+//   owed                spent this cycle, refunds and cashback taken off
+//   refunds             the refunds and cashback inside `owed`
+//   cycleClose          this cycle's statement day; lastClose the previous one
+//
+// `extraPayments` are card payments seen only on the bank side.
+export function cardPosition(account, transactions, importBatches, today, extraPayments = []) {
+  const day = account.billingCycleDay;
+  const closeOf = (iso) => nextOccurrence(day, dateOf(iso));
+  const closeBefore = (iso) => closeOnOrBefore(day, addDays(iso, -1));
+  const cycleClose = closeOf(today);
+  const lastClose = closeBefore(today);
+  const prevClose = closeBefore(lastClose);
+  const batches = new Map(importBatches.map((b) => [b.id, b]));
+
+  // Which cycle a transaction belongs to.
+  const cycleOf = (t) => {
+    const b = t.importBatchId ? batches.get(t.importBatchId) : null;
+    if (b && !b.provisional && b.periodEnd) return closeOf(b.periodEnd);
+    const close = closeOf(t.date);
+    // A current list shows only what's unbilled. A row dated in a cycle that
+    // closed well before the list was taken (ICICI's 11 Aug refund on the
+    // 15 Sep list) is on the bill of the cycle the list was taken in.
+    if (b && b.provisional) {
+      const taken = listTakenOn(b);
+      if (taken && close < addDays(taken, -3)) return closeOf(taken);
+    }
+    return close;
+  };
+
+  const spend = new Map(); // close -> net spend
+  const refunds = new Map();
+  const add = (close, t) => {
+    const signed = t.direction === 'credit' ? -t.amount : t.amount;
+    spend.set(close, (spend.get(close) || 0) + signed);
+    if (t.direction === 'credit') refunds.set(close, (refunds.get(close) || 0) + t.amount);
+  };
+  // The same list pasted on two devices before they synced: identical rows
+  // from different lists are counted as often as the list with most copies.
+  const listRows = new Map();
+  for (const t of transactions) {
+    if (t.accountId !== account.id || t.isTransfer) continue;
+    const close = cycleOf(t);
+    if (close < prevClose) continue; // long since billed and paid
+    if (t.source === 'unbilled') {
+      const key = `${close}|${t.date}|${t.amount}|${t.direction}|${t.rawDescription}`;
+      const perList = listRows.get(key) || new Map();
+      perList.set(t.importBatchId, [...(perList.get(t.importBatchId) || []), t]);
+      listRows.set(key, perList);
+      continue;
+    }
+    add(close, t);
+  }
+  for (const [key, perList] of listRows) {
+    const close = key.split('|')[0];
+    const copies = [...perList.values()].sort((a, b) => b.length - a.length)[0];
+    for (const t of copies) add(close, t);
+  }
+
+  // Bills for the cycles that have closed.
+  const bills = [prevClose, lastClose].map((close) => {
+    const fromStatement =
+      account.statementDue != null && account.statementPeriodEnd && Math.abs(dateOf(account.statementPeriodEnd) - dateOf(close)) <= 3 * DAY_MS;
+    return {
+      close,
+      fromStatement: Boolean(fromStatement),
+      known: Boolean(fromStatement) || spend.has(close),
+      amount: fromStatement ? account.statementDue : Math.max(0, spend.get(close) || 0),
+      markedPaid: Boolean(fromStatement && account.statementDuePaid),
+      left: 0,
+    };
+  });
+  bills.forEach((b) => (b.left = b.amount));
+
+  const payments = [
+    ...transactions.filter((t) => t.accountId === account.id && t.isTransfer && t.direction === 'credit'),
+    ...extraPayments,
+  ]
+    .filter((p) => p.date > prevClose)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  let advance = 0;
+  for (const p of payments) {
+    let amount = p.amount;
+    const payable = bills.filter((b) => b.known && b.close < p.date);
+    for (const b of payable) {
+      const take = Math.min(b.left, amount);
+      b.left -= take;
+      amount -= take;
+    }
+    // Paid more than the bills in the app: the extra comes off this cycle.
+    if (amount > 0 && payable.length) advance += amount;
+  }
+  for (const b of bills) if (b.markedPaid) b.left = 0;
+
+  const unpaid = bills.filter((b) => b.fromStatement).reduce((s, b) => s + b.left, 0);
+  const billedNotImported = bills.filter((b) => !b.fromStatement).reduce((s, b) => s + b.left, 0);
+  const owed = Math.max((spend.get(cycleClose) || 0) - advance, -(unpaid + billedNotImported));
+  return {
+    unpaid,
+    billedNotImported,
+    owed,
+    refunds: refunds.get(cycleClose) || 0,
+    cycleClose,
+    lastClose,
+    statementMissing: bills[1].known && !bills[1].fromStatement,
+  };
+}
+
+const DAY_MS = 86400000;
+
+function dateOf(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addDays(iso, delta) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return isoLocal(new Date(y, m - 1, d + delta));
+}
+
+// The latest statement day on or before `iso`, clamped to short months.
+function closeOnOrBefore(dayOfMonth, iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const clamp = (year, monthIndex) => Math.min(dayOfMonth, new Date(year, monthIndex + 1, 0).getDate());
+  if (clamp(y, m - 1) <= d) return isoLocal(new Date(y, m - 1, clamp(y, m - 1)));
+  return isoLocal(new Date(y, m - 2, clamp(y, m - 2)));
 }
 
 export function cardCycleSpend(account, transactions, importBatches) {

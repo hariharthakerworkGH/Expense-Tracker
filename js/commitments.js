@@ -110,6 +110,11 @@ export function commitmentDueInWindow(item, { today, windowEnd, bankEntries, who
         const spent = bankEntries.filter((t) => t.date >= monthStart && t.date <= today && matcher(t)).reduce((s, t) => s + t.amount, 0);
         part = Math.max(0, item.amount - spent);
         parts.push(spent > 0 ? `${formatShort(part)} left this month` : `${formatShort(part)} this month`);
+      } else if (cursor === today) {
+        // This month is under way and there's no way to see what has already
+        // gone on it: count the share for the days still left.
+        part = Math.round(item.amount * (days / daysInMonth));
+        parts.push(`${formatShort(part)} for the rest of this month`);
       } else {
         part = wholeMonths ? item.amount : Math.round(item.amount * (days / daysInMonth));
         parts.push(`${formatShort(part)} in ${new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'short' })}`);
