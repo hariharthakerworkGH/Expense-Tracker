@@ -3,7 +3,7 @@ import { formatCurrency, formatSignedCurrency, ordinal, formatDateNice } from '.
 import { detectRecurring } from '../recurring.js';
 import { categoryStyle } from '../category-style.js';
 import { getBudgets, setBudget, budgetStatusForMonth, cycleAwareEnabled } from '../budgets.js';
-import { computeMonthBudget } from '../month-budget.js';
+import { computeFreeToSpend, DEFAULT_KEEP_IN_BANK } from '../free-to-spend.js';
 import { currentMonthKey, cycleExplanation } from '../spending-month.js';
 import { FREQUENCIES, DEFAULT_FREQUENCY, monthlyAmountOf, frequencyOf, frequencyShort, hasDueDate, toMonthly, toYearly, isoLocal } from '../frequency.js';
 import { isFixed, isFinished, isLiveCommitment, coveredByFixed } from '../commitments.js';
@@ -42,12 +42,15 @@ export async function render(container) {
   const incomeValue = income != null ? income : suggestedIncome;
   const disposable = incomeValue != null ? incomeValue - fixedTotal : null;
 
-  // The same month figure the Summary leads with.
-  const month = await computeMonthBudget(now);
-  const left = month.left;
-  const daysLeft = month.daysLeft;
-  const perDay = month.perDay;
-  const usedPct = month.income > 0 ? Math.min(100, Math.round((month.spentTotal / month.income) * 100)) : 0;
+  // The same figure the Summary leads with: what can still go on the cards
+  // this cycle.
+  const cycle = await computeFreeToSpend(now);
+  const keepInBank = await getSetting('keepInBank', DEFAULT_KEEP_IN_BANK);
+  const left = cycle.salary.setUp ? cycle.free : null;
+  const daysLeft = cycle.daysToClose;
+  const perDay = cycle.perDay;
+  const usedPct = cycle.limit > 0 ? Math.min(100, Math.round(cycle.used * 100)) : 100;
+  const until = formatDateNice(cycle.cycleClose || cycle.windowEnd);
 
   // Hide suggestions already covered by something fixed. Category match only
   // counts when both actually have one - otherwise a single uncategorised fixed
@@ -65,17 +68,17 @@ export async function render(container) {
     ${
       left != null
         ? `<div class="hero">
-            <p class="hero-label">Left to spend in ${month.monthName}</p>
+            <p class="hero-label">Left to spend until ${until}</p>
             <p class="hero-amount ${left < 0 ? 'negative' : ''}">${formatSignedCurrency(left)}</p>
-            <div class="hero-meter"><div class="hero-meter-fill ${left < 0 ? 'over' : ''}" style="width:${usedPct}%"></div></div>
+            <div class="hero-meter"><div class="hero-meter-fill ${cycle.level === 'ok' ? '' : cycle.level === 'warning' ? 'warn' : 'over'}" style="width:${usedPct}%"></div></div>
             <p class="hero-sub">${
               left < 0
-                ? `Over by ${formatCurrency(Math.abs(left))} with ${daysLeft} day${daysLeft === 1 ? '' : 's'} to go.`
-                : `About ${formatCurrency(perDay)} a day for the remaining ${daysLeft} day${daysLeft === 1 ? '' : 's'}.`
+                ? `Over this card cycle's limit by ${formatCurrency(Math.abs(left))}, with ${daysLeft} day${daysLeft === 1 ? '' : 's'} to the statement.`
+                : `About ${formatCurrency(perDay)} a day for the ${daysLeft} day${daysLeft === 1 ? '' : 's'} to the statement.`
             }</p>
             <div class="hero-split">
-              <div class="hero-stat"><span class="stat-label">Free each month</span><span class="stat-value">${formatCurrency(disposable)}</span></div>
-              <div class="hero-stat"><span class="stat-label">Spent in ${month.monthName}</span><span class="stat-value out">${formatCurrency(month.spentTotal)}</span></div>
+              <div class="hero-stat"><span class="stat-label">Limit this cycle</span><span class="stat-value">${formatSignedCurrency(cycle.limit)}</span></div>
+              <div class="hero-stat"><span class="stat-label">Spent on cards</span><span class="stat-value out">${formatCurrency(cycle.spentThisCycle)}</span></div>
             </div>
           </div>`
         : `<p class="import-intro">Put in what you earn and what's already committed each month, and this works out what's genuinely free to spend.</p>`
@@ -91,7 +94,12 @@ export async function render(container) {
         <span>Salary day <span class="muted">(the date it lands in your bank)</span></span>
         <input type="number" id="plan-salary-day" inputmode="numeric" min="1" max="31" step="1" placeholder="e.g. 1" value="${salaryDay || ''}">
       </label>
-      <p class="muted-note">Pick 31 if it comes on the last day of every month. A salary that lands after the 15th is counted as money for the next month - the 30 September salary pays for October.</p>
+      <p class="muted-note">Pick 31 if it comes on the last day of every month.</p>
+      <label class="field">
+        <span>Keep in the bank after bills <span class="muted">(never let it drop below this)</span></span>
+        <input type="number" id="plan-keep" inputmode="decimal" step="1" min="0" placeholder="10000" value="${(Math.max(0, Number(keepInBank) || 0) / 100).toFixed(0)}">
+      </label>
+      <p class="muted-note">Your card spending limit is set so that after your salary, the month's fixed commitments and the card bills, at least this much is still in your bank.</p>
       ${
         income == null && suggestedIncome != null
           ? `<p class="muted-note">Suggested from what landed in your Income category recently. Change it if that's not typical.</p>`
@@ -155,6 +163,13 @@ export async function render(container) {
   incomeEl.addEventListener('change', async () => {
     const raw = parseFloat(incomeEl.value);
     await setSetting('monthlyIncome', Number.isFinite(raw) ? Math.round(raw * 100) : null);
+    render(container);
+  });
+
+  const keepEl = container.querySelector('#plan-keep');
+  keepEl.addEventListener('change', async () => {
+    const raw = parseFloat(keepEl.value);
+    await setSetting('keepInBank', Number.isFinite(raw) && raw >= 0 ? Math.round(raw * 100) : DEFAULT_KEEP_IN_BANK);
     render(container);
   });
 

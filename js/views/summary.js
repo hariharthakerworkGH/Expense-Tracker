@@ -3,7 +3,7 @@ import { isFixed, isLiveCommitment, coveredByFixed } from '../commitments.js';
 import { isoLocal, hasDueDate, frequencyOf } from '../frequency.js';
 import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
 import { cardBillDue } from '../account-metrics.js';
-import { computeMonthBudget } from '../month-budget.js';
+import { computeFreeToSpend } from '../free-to-spend.js';
 import { detectRecurring, nextDueDate } from '../recurring.js';
 import { detectAnomalies } from '../anomalies.js';
 import { categoryStyle } from '../category-style.js';
@@ -52,82 +52,119 @@ export async function render(container) {
 
 async function renderDashboard(container) {
   const dashboardEl = container.querySelector('#dashboard');
-  const [transactions, budget, cycleAware, accounts] = await Promise.all([getAll('transactions'), computeMonthBudget(), cycleAwareEnabled(), getAll('accounts')]);
+  const [transactions, fts] = await Promise.all([getAll('transactions'), computeFreeToSpend()]);
 
-  dashboardEl.innerHTML = [renderMonthBudget(budget, cycleExplanation(accounts, cycleAware)), '<div id="attention-section"></div>', '<div id="upcoming-section"></div>'].join('');
+  dashboardEl.innerHTML = [renderSpendingLimit(fts), '<div id="attention-section"></div>', '<div id="upcoming-section"></div>'].join('');
 
-  await renderAttention(container, transactions);
+  await renderAttention(container, transactions, fts);
   await renderUpcoming(container);
+  notifySpendingLevel(fts);
 }
 
-// The headline: what's left to spend this month, with the sum one tap away -
-// the month's money, less the fixed commitments, less what's been spent.
-function renderMonthBudget(b, cycleNote) {
-  if (!b.setUp) {
-    return `<div class="totals-card"><p class="muted-note">Put your monthly income and salary day on the Plan screen, and this shows exactly how much is left to spend this month.</p></div>`;
+// What the level means in words, used by the hero and the attention list.
+export function spendingWarning(f) {
+  const until = formatDateNice(f.cycleClose || f.windowEnd);
+  if (f.level === 'over') return `You're ${formatCurrency(-f.free)} over this cycle's limit. Stop card spending until ${until}, or your bank won't cover the bills.`;
+  if (f.level === 'critical') return `Critical: only ${formatCurrency(f.free)} left until ${until}${f.crossesOn ? ` — at your pace you cross the limit on ${formatDateNice(f.crossesOn)}` : ''}.`;
+  if (f.level === 'warning')
+    return f.crossesOn
+      ? `Careful: at ${formatCurrency(f.pace)} a day you'll hit the limit on ${formatDateNice(f.crossesOn)}, before the cycle ends on ${until}.`
+      : `Careful: you've used ${Math.round(f.used * 100)}% of this cycle's limit.`;
+  return null;
+}
+
+// The headline: how much more can go on the cards this cycle, measured against
+// a limit worked out from the bank, the coming salary and the fixed
+// commitments - with the sum one tap away.
+function renderSpendingLimit(f) {
+  if (f.bank == null || !f.salary.setUp) {
+    return `<div class="totals-card"><p class="muted-note">${
+      f.bank == null
+        ? 'Import a bank statement so the app knows your balance — then this shows how much you can still put on your cards.'
+        : 'Put your monthly income and salary day on the Plan screen — then this shows how much you can still put on your cards.'
+    }</p></div>`;
   }
 
+  const until = formatDateNice(f.cycleClose || f.windowEnd);
+  const pct = f.limit > 0 ? Math.min(100, Math.round(f.used * 100)) : 100;
+  const warning = spendingWarning(f);
   const line = (label, amount, sign, note = '') =>
     `<div class="totals-row"><span>${label}${note ? `<br><span class="muted-note">${note}</span>` : ''}</span><span class="${sign === '+' ? 'in' : 'out'}">${sign}${formatCurrency(Math.abs(amount))}</span></div>`;
-  const salaryNote = b.salary.received.length
-    ? `came in ${b.salary.received.map((t) => formatDateNice(t.date)).join(', ')}`
-    : b.salary.payday
-      ? `expected ${formatDateNice(b.salary.payday)}`
-      : 'from Plan';
-  const commitmentNote = (c) => {
-    if (c.over) return `${formatCurrency(c.paid)} spent on it — ${formatCurrency(c.over)} over`;
-    if (c.paid >= c.planned) return 'paid ✓';
-    if (c.paid > 0) return `${formatCurrency(c.paid)} gone out, ${formatCurrency(c.remaining)} still to go`;
-    return 'still to go out';
-  };
+  const billsPayday = f.salary.billsPayday ? formatDateNice(f.salary.billsPayday) : null;
 
   return `
-    <div class="hero">
-      <p class="hero-label">Left to spend in ${b.monthName}</p>
-      <p class="hero-amount ${b.left < 0 ? 'negative' : ''}">${formatSignedCurrency(b.left)}</p>
+    <div class="hero level-${f.level}">
+      <p class="hero-label">Left to spend until ${until}</p>
+      <p class="hero-amount ${f.free < 0 ? 'negative' : ''}">${formatSignedCurrency(f.free)}</p>
+      <div class="hero-meter"><div class="hero-meter-fill ${f.level === 'ok' ? '' : f.level === 'warning' ? 'warn' : 'over'}" style="width:${pct}%"></div></div>
       <p class="hero-sub">${
-        b.left > 0
-          ? `About ${formatCurrency(b.perDay)} a day for the ${b.daysLeft} day${b.daysLeft === 1 ? '' : 's'} left in ${b.monthName}.`
-          : `${formatCurrency(-b.left)} over for ${b.monthName}, with ${b.daysLeft} day${b.daysLeft === 1 ? '' : 's'} to go.`
+        warning
+          ? escapeHtml(warning)
+          : `About ${formatCurrency(f.perDay)} a day for the ${f.daysToClose} day${f.daysToClose === 1 ? '' : 's'} until your statement on ${until}.`
       }</p>
       <div class="hero-split">
         <div class="hero-stat">
-          <span class="stat-label">Spent in ${b.monthName}</span>
-          <span class="stat-value out">${formatCurrency(b.spentTotal)}</span>
+          <span class="stat-label">Spent on cards</span>
+          <span class="stat-value out">${formatCurrency(f.spentThisCycle)}</span>
         </div>
         <div class="hero-stat">
-          <span class="stat-label">In your bank</span>
-          <span class="stat-value">${b.bank == null ? '—' : formatCurrency(b.bank)}</span>
+          <span class="stat-label">Limit this cycle</span>
+          <span class="stat-value">${formatSignedCurrency(f.limit)}</span>
         </div>
       </div>
       <details class="fts-breakdown">
         <summary>How this is worked out</summary>
         <div class="totals-card">
-          ${line(`Salary for ${b.monthName}`, b.salary.amount, '+', salaryNote)}
-          ${b.otherIncomeTotal ? line('Other money in', b.otherIncomeTotal, '+', `${b.otherIncome.length} credit${b.otherIncome.length === 1 ? '' : 's'} to your bank this month`) : ''}
-          ${b.commitments.map((c) => line(escapeHtml(c.label), c.counted, '-', commitmentNote(c))).join('')}
-          ${line('Everything else you spent', b.otherSpent, '-', `bank and cards, ${b.otherRows.length} entr${b.otherRows.length === 1 ? 'y' : 'ies'}`)}
-          ${b.cardRefunds ? line('Card refunds and cashback', b.cardRefunds, '+') : ''}
-          <div class="totals-row net"><span>Left to spend</span><span>${formatSignedCurrency(b.left)}</span></div>
+          ${line('In your bank now', f.bank, '+', f.bankLines.map((l) => `as of ${formatDateNice(l.asOf)}${l.entriesSince ? ` + ${l.entriesSince} entr${l.entriesSince === 1 ? 'y' : 'ies'} since` : ''}`).join(' · '))}
+          ${f.salary.dates.map((d) => line('Salary', f.salary.amount / f.salary.dates.length, '+', `${formatDateNice(d)}${f.salary.late && d === f.salary.dates[0] ? ' · late, not in yet' : ''}`)).join('')}
+          ${f.cards.filter((c) => c.unpaid > 0).map((c) => line(`${escapeHtml(c.account.label)} bill`, c.unpaid, '-', c.billedNotImported ? 'billed, statement not imported yet' : 'billed, not paid yet')).join('')}
+          ${f.commitments.map((c) => line(escapeHtml(c.label), c.amount, '-', c.detail)).join('')}
+          ${f.keep ? line('Kept in your bank', f.keep, '-', 'change this on Plan') : ''}
+          <div class="totals-row net"><span>Limit for this card cycle</span><span>${formatSignedCurrency(f.limit)}</span></div>
+          ${f.cards
+            .filter((c) => c.owed !== 0)
+            .map((c) =>
+              line(
+                escapeHtml(c.account.label),
+                c.owed,
+                c.owed < 0 ? '+' : '-',
+                `this cycle · ${c.listImportedAt ? `list from ${formatDateNice(c.listImportedAt)}` : 'from saved entries only'}`
+              )
+            )
+            .join('')}
+          <div class="totals-row net"><span>Left to spend</span><span>${formatSignedCurrency(f.free)}</span></div>
         </div>
-        ${cycleNote ? `<p class="muted-note">${escapeHtml(cycleNote)}</p>` : ''}
-        ${
-          b.bank != null
-            ? `<div class="totals-card">
-                ${line('In your bank now', b.bank, '+')}
-                ${b.unpaidBills ? line('Card bills not paid yet', b.unpaidBills, '-') : ''}
-                ${b.bankCommitmentsLeft ? line('Commitments still to go out', b.bankCommitmentsLeft, '-') : ''}
-                <div class="totals-row net"><span>Bank after those</span><span>${formatSignedCurrency(b.bankAfter)}</span></div>
-              </div>`
-            : ''
-        }
-        ${b.notes.map((n) => `<p class="muted-note">${escapeHtml(n)}</p>`).join('')}
+        <p class="muted-note">Card spends until ${until} are billed that day and paid from your salary${billsPayday ? ` on ${billsPayday}` : ''}. The limit makes sure that after that salary, your fixed commitments for the month and those card bills, ${formatCurrency(f.keep)} is still in your bank. UPI and cash spends come out of the same limit.</p>
+        ${f.notes.map((n) => `<p class="muted-note">${escapeHtml(n)}</p>`).join('')}
       </details>
     </div>
   `;
 }
 
-async function renderAttention(container, transactions) {
+// A phone notification the first time this cycle's spending reaches warning,
+// critical or over - once per level per cycle, only with reminders turned on.
+async function notifySpendingLevel(f) {
+  if (!['warning', 'critical', 'over'].includes(f.level) || !f.cycleClose) return;
+  try {
+    if (!(await getSetting('remindersEnabled', false)) || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    const key = `${f.cycleClose}:${f.level}`;
+    const sent = await getSetting('spendingAlertsSent', []);
+    if (sent.includes(key)) return;
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (!reg) return;
+    await reg.showNotification(f.level === 'warning' ? 'Card spending: getting close' : f.level === 'critical' ? 'Card spending: critical' : 'Card spending limit crossed', {
+      body: spendingWarning(f),
+      tag: `spending-${f.cycleClose}`,
+      icon: './icons/icon-192.png',
+      data: { view: 'summary' },
+    });
+    await setSetting('spendingAlertsSent', [...sent.filter((k) => k.split(':')[0] === f.cycleClose), key]);
+  } catch (e) {
+    // A notification that can't be shown still leaves the warning on screen.
+  }
+}
+
+async function renderAttention(container, transactions, fts = null) {
   const el = container.querySelector('#attention-section');
   if (!el) return;
 
@@ -153,7 +190,9 @@ async function renderAttention(container, transactions) {
 
   const budgetAlerts = (await budgetStatusForMonth(budgets, categories, transactions, currentMonthKey())).filter((b) => b.state !== 'ok');
 
-  if (alertsWaiting === 0 && uncategorized.length === 0 && anomalies.length === 0 && dueCards.length === 0 && budgetAlerts.length === 0) {
+  const spending = fts ? spendingWarning(fts) : null;
+
+  if (!spending && alertsWaiting === 0 && uncategorized.length === 0 && anomalies.length === 0 && dueCards.length === 0 && budgetAlerts.length === 0) {
     el.innerHTML = `<h3>Needs your attention</h3><div class="totals-card"><p class="muted-note">Nothing to deal with right now.</p></div>`;
     return;
   }
@@ -161,6 +200,13 @@ async function renderAttention(container, transactions) {
   el.innerHTML = `
     <h3>Needs your attention</h3>
     <div class="totals-card">
+      ${
+        spending
+          ? `<div class="attention-row">
+              <span>${fts.level === 'warning' ? '⚠️' : '🛑'} Card spending<br><span class="muted-note ${fts.level === 'warning' ? 'bill-urgent' : 'bill-overdue'}">${escapeHtml(spending)}</span></span>
+            </div>`
+          : ''
+      }
       ${
         alertsWaiting > 0
           ? `<div class="attention-row">

@@ -339,6 +339,20 @@ code {
   background: var(--out);
 }
 
+.hero-meter-fill.warn {
+  background: var(--warn);
+}
+
+/* The spending hero's border turns amber, then red, as the limit gets close. */
+.hero.level-warning {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border-hi));
+}
+
+.hero.level-critical,
+.hero.level-over {
+  border-color: color-mix(in srgb, var(--out) 60%, var(--border-hi));
+}
+
 .hero-split {
   display: flex;
   gap: 10px;

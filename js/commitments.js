@@ -29,7 +29,7 @@ export function isLiveCommitment(r, today = isoLocal(new Date())) {
 const CASH_LABEL_RE = /\b(atm|cash)\b/i;
 const CASH_ENTRY_RE = /\bNWD-|\bATM\b|\bCASH\s*(WDL|WITHDRAWAL)|\bATW-/i;
 
-export function entryMatcher(item) {
+function entryMatcher(item) {
   if (item.matchText && item.matchText.trim()) {
     const needle = item.matchText.trim().toLowerCase();
     return (t) => (t.rawDescription || '').toLowerCase().includes(needle);
@@ -84,7 +84,10 @@ const LATE_DAYS = 5;
 // windowEnd (both YYYY-MM-DD). `bankEntries` are debits on bank accounts;
 // only ones already in the bank balance should be passed, since those are
 // the payments the balance has already paid for.
-export function commitmentDueInWindow(item, { today, windowEnd, bankEntries }) {
+// With `wholeMonths`, a spread commitment counts in full for every month the
+// window reaches into: the window ends the day before a payday at the end of
+// a month, and that month's cash still comes out of the salary before it.
+export function commitmentDueInWindow(item, { today, windowEnd, bankEntries, wholeMonths = false }) {
   const freq = frequencyOf(item);
   const last = item.endDate && item.endDate < windowEnd ? item.endDate : windowEnd;
   const matcher = entryMatcher(item);
@@ -108,7 +111,7 @@ export function commitmentDueInWindow(item, { today, windowEnd, bankEntries }) {
         part = Math.max(0, item.amount - spent);
         parts.push(spent > 0 ? `${formatShort(part)} left this month` : `${formatShort(part)} this month`);
       } else {
-        part = Math.round(item.amount * (days / daysInMonth));
+        part = wholeMonths ? item.amount : Math.round(item.amount * (days / daysInMonth));
         parts.push(`${formatShort(part)} in ${new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'short' })}`);
       }
       amount += part;

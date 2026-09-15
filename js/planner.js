@@ -3,7 +3,7 @@ import { spendByCategoryForMonth, monthStartISO, getBudgets, cycleAwareEnabled }
 import { currentMonthKey, previousMonthKey } from './spending-month.js';
 import { monthlyAmountOf, yearlyAmountOf } from './frequency.js';
 import { isLiveCommitment } from './commitments.js';
-import { computeMonthBudget } from './month-budget.js';
+import { computeFreeToSpend } from './free-to-spend.js';
 
 // The planning engine.
 //
@@ -38,17 +38,21 @@ export async function financialSnapshot(now = new Date()) {
 
   const spentMap = spendByCategoryForMonth(transactions, accounts, currentMonthKey(now), cycleAware);
 
-  // The month's figures come from the same place as the Summary's headline,
-  // so Plan, Coach and Summary always agree on what's left.
-  const month = await computeMonthBudget(now);
-  const fixedMonthly = month.committed;
-  const variableSpent = Math.max(0, month.spentNet);
-  const free = month.setUp ? month.income - month.committed : income != null ? income - fixed.reduce((s, r) => s + monthlyAmountOf(r), 0) : null;
-  const leftToSpend = month.left;
+  const fixedMonthly = fixed.reduce((s, r) => s + monthlyAmountOf(r), 0);
+  let variableSpent = 0;
+  for (const [categoryId, amount] of spentMap) {
+    if (!fixedCategoryIds.has(categoryId)) variableSpent += amount;
+  }
+  const free = income != null ? income - fixedMonthly : null;
+
+  // "Left to spend" is the Summary's headline - what can still go on the cards
+  // this cycle - so Plan, Coach and Summary always agree.
+  const cycle = await computeFreeToSpend(now);
+  const leftToSpend = cycle.free;
 
   // Run rate is measured over the days that have actually happened, then
   // carried across the days that haven't.
-  const runRate = month.runRate;
+  const runRate = daysElapsed > 0 ? Math.round(variableSpent / daysElapsed) : 0;
   const projectedVariable = variableSpent + runRate * daysLeft;
   const projectedOver = free != null ? projectedVariable - free : null;
 
@@ -71,8 +75,8 @@ export async function financialSnapshot(now = new Date()) {
     runRate,
     projectedVariable,
     projectedOver,
-    perDayAllowance: leftToSpend != null ? month.perDay : null,
-    month,
+    perDayAllowance: leftToSpend != null ? cycle.perDay : null,
+    cycle,
     spentMap,
     accounts,
     cycleAware,

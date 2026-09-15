@@ -4,22 +4,31 @@ import { nextOccurrence, isoLocal } from './frequency.js';
 import { isLiveCommitment, commitmentDueInWindow } from './commitments.js';
 import { looksLikeCardPayment } from './transfers.js';
 
-// The one number the app leads with: how much you can still spend before your
-// bank account runs out, once everything already owed is taken off.
+// The one number the app leads with: how much more can go on your cards (or
+// out by UPI) in this card cycle, so that once the salary lands, the fixed
+// commitments go out and this cycle's card bills are paid, the bank still
+// holds what you asked it to keep.
+//
+// This cycle's card spends are billed on the statement day (the 25th) and
+// paid from the salary that follows it. So:
 //
 //   bank balance now
-// + your next salary (the one that pays this cycle's card bills)
+// + salaries still to come, up to the one that pays this cycle's bills
 // − card bills already billed and not yet paid
-// − what you owe on each card for the cycle not yet billed (refunds and cashback taken off)
-// − commitments paid from the bank that fall due before the window ends
+// − fixed commitments paid from the bank until that salary's month is over
+//   (its whole month - every commitment comes out of that salary)
+// − what you want left in the bank
+// = spending limit for this card cycle
+// − spent on cards so far this cycle (refunds and cashback taken off)
+// = left to spend
 //
-// The window runs from today to the day before the salary after next, so it
-// holds exactly one salary: one allowance for one pay period. Every line is
-// returned so the screen can show the sum rather than just its answer.
+// Every line is returned so the screen can show the sum, not just its answer.
 
 const DAY_MS = 86400000;
 const SALARY_EARLY_DAYS = 7;
 const SALARY_LATE_DAYS = 5;
+// What stays in the bank after the bills, unless changed on Plan: ₹10,000.
+export const DEFAULT_KEEP_IN_BANK = 1000000;
 
 function addDays(iso, delta) {
   const [y, m, d] = iso.split('-').map(Number);
@@ -46,13 +55,14 @@ function daysBetweenInclusive(fromIso, toIso) {
 }
 
 export async function computeFreeToSpend(now = new Date()) {
-  const [accounts, transactions, importBatches, recurring, monthlyIncome, salaryDay] = await Promise.all([
+  const [accounts, transactions, importBatches, recurring, monthlyIncome, salaryDay, keepInBank] = await Promise.all([
     getAll('accounts'),
     getAll('transactions'),
     getAll('importBatches'),
     getAll('recurring'),
     getSetting('monthlyIncome', null),
     getSetting('salaryDay', null),
+    getSetting('keepInBank', DEFAULT_KEEP_IN_BANK),
   ]);
 
   const today = isoLocal(now);
@@ -60,6 +70,13 @@ export async function computeFreeToSpend(now = new Date()) {
   const cardAccounts = accounts.filter((a) => a.type === 'card');
   const cardIds = new Set(cardAccounts.map((a) => a.id));
   const notes = [];
+
+  // --- The card cycle -------------------------------------------------------
+  // It closes on the statement day. With cards on different days, the last to
+  // close sets the date, so every card's current spends are inside it.
+  const statementDays = [...new Set(cardAccounts.map((a) => a.billingCycleDay).filter(Boolean))];
+  const cycleClose = statementDays.length ? statementDays.map((d) => nextOccurrence(d, now)).sort().pop() : null;
+  const cycleStart = cycleClose ? addDays(paydayOnOrBefore(Math.max(...statementDays), addDays(cycleClose, -1)), 1) : null;
 
   // --- Bank ---------------------------------------------------------------
   const bankLines = bankAccounts
@@ -75,7 +92,7 @@ export async function computeFreeToSpend(now = new Date()) {
 
   // --- Salary and the window ----------------------------------------------
   const bankIds = new Set(bankAccounts.map((a) => a.id));
-  let salary = { amount: 0, date: null, counted: false, alreadyIn: false, late: false, setUp: false };
+  let salary = { amount: 0, date: null, counted: false, alreadyIn: false, late: false, setUp: false, dates: [], billsPayday: null };
   let windowEnd;
   if (salaryDay && monthlyIncome) {
     salary.setUp = true;
@@ -97,26 +114,32 @@ export async function computeFreeToSpend(now = new Date()) {
     const previous = paydayOnOrBefore(salaryDay, today);
     const next = dayAfter(today);
 
-    // Once a salary is in the bank, the plan moves on to the pay period it
-    // funds and counts the salary after it - whether it landed on the day,
-    // early or late - so the number changes when the money arrives, not on a
-    // date that happens to be on the calendar.
+    // The first salary not yet in the bank. One that came early, on the day
+    // or a little late is already in the balance; one a few days late that
+    // hasn't arrived is still to come, not missing.
+    let first;
     if (next <= addDays(today, SALARY_EARLY_DAYS) && landedFor(next)) {
-      const after = dayAfter(next);
-      salary = { ...salary, amount: monthlyIncome, date: after, counted: true, alreadyIn: true };
-      windowEnd = addDays(dayAfter(after), -1);
+      first = dayAfter(next);
+      salary.alreadyIn = true;
     } else if (landedFor(previous)) {
-      salary = { ...salary, amount: monthlyIncome, date: next, counted: true };
-      windowEnd = addDays(dayAfter(next), -1);
+      first = next;
     } else if (today <= addDays(previous, SALARY_LATE_DAYS)) {
-      // Payday was in the last few days and nothing has arrived yet: it's
-      // late, not missing. Count it, and plan only until the next payday.
-      salary = { ...salary, amount: monthlyIncome, date: previous, counted: true, late: true };
-      windowEnd = addDays(next, -1);
+      first = previous;
+      salary.late = true;
     } else {
-      salary = { ...salary, amount: monthlyIncome, date: next, counted: true };
-      windowEnd = addDays(dayAfter(next), -1);
+      first = next;
     }
+
+    // The salary that pays this cycle's card bills: the first payday on or
+    // after the statement day. Every salary up to it is counted, and the
+    // plan runs to the end of the month that salary pays for.
+    const billsPayday = cycleClose ? nextOccurrence(salaryDay, dateOf(cycleClose)) : first;
+    for (let d = first; d <= billsPayday; d = dayAfter(d)) salary.dates.push(d);
+    salary.billsPayday = billsPayday;
+    salary.amount = monthlyIncome * salary.dates.length;
+    salary.counted = salary.dates.length > 0;
+    salary.date = salary.dates[0] || null;
+    windowEnd = addDays(dayAfter(billsPayday), -1);
   } else {
     // Without a salary day there's no pay period to plan to, so plan to the
     // end of this month and count no future income.
@@ -176,7 +199,19 @@ export async function computeFreeToSpend(now = new Date()) {
       .sort((a, b) => (a.importedAt < b.importedAt ? 1 : -1))[0];
     c.listImportedAt = latestList ? latestList.importedAt : null;
     // A statement day has passed since the last imported statement.
-    c.statementMissing = Boolean(c.cycleStart && c.since && c.cycleStart > c.since);
+    const lastClose = c.account.billingCycleDay ? paydayOnOrBefore(c.account.billingCycleDay, today) : null;
+    c.statementMissing = Boolean(lastClose && c.since && lastClose > c.since);
+    // Until that statement is imported, what was spent before the statement
+    // day is a bill already cut, not spending in the current cycle.
+    c.billedNotImported = 0;
+    if (c.statementMissing) {
+      const current = transactions
+        .filter((t) => t.accountId === c.account.id && !t.isTransfer && t.date > lastClose)
+        .reduce((s, t) => s + (t.direction === 'credit' ? -t.amount : t.amount), 0);
+      c.billedNotImported = Math.max(0, c.owed - Math.max(0, current));
+      c.owed -= c.billedNotImported;
+      c.unpaid += c.billedNotImported;
+    }
     delete c.credits;
     delete c.owedNet;
   }
@@ -199,27 +234,60 @@ export async function computeFreeToSpend(now = new Date()) {
   for (const item of recurring) {
     if (!isLiveCommitment(item, today)) continue;
     if (item.accountId && cardIds.has(item.accountId)) continue;
-    const { amount, detail } = commitmentDueInWindow(item, { today, windowEnd, bankEntries });
+    const { amount, detail } = commitmentDueInWindow(item, { today, windowEnd, bankEntries, wholeMonths: true });
     if (amount > 0) commitments.push({ label: item.label, amount, detail });
   }
 
   const owedCards = cards.reduce((s, c) => s + c.owed, 0);
   const unpaidBills = cards.reduce((s, c) => s + c.unpaid, 0);
   const commitmentsTotal = commitments.reduce((s, c) => s + c.amount, 0);
-  const free = bank == null ? null : bank + salary.amount - unpaidBills - owedCards - commitmentsTotal;
+  const keep = Math.max(0, Number(keepInBank) || 0);
+  const limit = bank == null ? null : bank + salary.amount - unpaidBills - commitmentsTotal - keep;
+  const free = limit == null ? null : limit - owedCards;
+
+  // --- How close to the limit ---------------------------------------------
+  const spendEnd = cycleClose || windowEnd;
+  const daysToClose = Math.max(1, daysBetweenInclusive(today, spendEnd));
+  const daysIntoCycle = cycleStart ? Math.max(1, daysBetweenInclusive(cycleStart, today)) : null;
+  const pace = daysIntoCycle ? Math.round(Math.max(0, owedCards) / daysIntoCycle) : 0;
+  // At the pace of this cycle so far, the day the limit would be crossed. The
+  // first few days of a cycle are too few to judge a pace by.
+  const crossesOn = free != null && free > 0 && pace > 0 && daysIntoCycle >= MIN_DAYS_FOR_PACE ? addDays(today, Math.floor(free / pace)) : null;
+  const used = limit > 0 ? owedCards / limit : 1;
+  let level = 'ok';
+  if (free == null) level = 'unknown';
+  else if (free < 0) level = 'over';
+  else if (used >= CRITICAL_SHARE || (crossesOn && crossesOn <= addDays(today, 3))) level = 'critical';
+  else if (used >= WARNING_SHARE || (crossesOn && crossesOn <= spendEnd)) level = 'warning';
 
   return {
     today,
     windowEnd,
     daysLeft,
+    cycleStart,
+    cycleClose,
+    daysToClose,
+    daysIntoCycle,
     bank,
     bankLines,
     salary,
     cards,
     commitments,
+    keep,
     totals: { owedCards, unpaidBills, commitments: commitmentsTotal },
+    limit,
+    spentThisCycle: owedCards,
     free,
-    perDay: free != null && free > 0 ? Math.floor(free / daysLeft) : 0,
+    perDay: free != null && free > 0 ? Math.floor(free / daysToClose) : 0,
+    pace,
+    crossesOn: crossesOn && crossesOn <= spendEnd ? crossesOn : null,
+    used,
+    level,
     notes,
   };
 }
+
+// Warn at three quarters of the limit, and call it critical at 90%.
+const WARNING_SHARE = 0.75;
+const CRITICAL_SHARE = 0.9;
+const MIN_DAYS_FOR_PACE = 5;

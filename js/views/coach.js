@@ -1,4 +1,4 @@
-import { formatCurrency, formatSignedCurrency } from '../format.js';
+import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
 import { isoLocal } from '../frequency.js';
 import { categoryStyle } from '../category-style.js';
 import { financialSnapshot, affordability, savingsPlan, whereToCut, observations } from '../planner.js';
@@ -17,6 +17,8 @@ export async function render(container) {
   // with, so the app never gives two different answers to the same question.
   const snapshot = await financialSnapshot();
   const notes = observations(snapshot);
+  // "Can I afford this?" spreads what's left over the days until the statement.
+  const cash = { ...snapshot, daysLeft: snapshot.cycle.daysToClose, runRate: snapshot.cycle.pace };
 
   container.innerHTML = `
     ${heroTemplate(snapshot)}
@@ -47,41 +49,42 @@ export async function render(container) {
     });
   });
 
-  wirePanel(container, snapshot, snapshot);
+  wirePanel(container, snapshot, cash);
 }
 
-// The forecast: at the pace you've actually been spending, where does this
-// month's left-to-spend end up by the last day of the month?
-function heroTemplate(s) {
-  const m = s.month;
-  if (s.leftToSpend == null) {
+// The forecast: at the pace your cards have been used this cycle, where does
+// what's left end up by the statement day?
+function heroTemplate(snapshot) {
+  const c = snapshot.cycle;
+  if (c.free == null || !c.salary.setUp) {
     return `
       <div class="hero">
-        <p class="hero-label">Left to spend this month</p>
+        <p class="hero-label">Left to spend</p>
         <p class="hero-amount">—</p>
-        <p class="hero-sub">Put your monthly income and salary day on the Plan screen, and I can tell you how far your money goes.</p>
+        <p class="hero-sub">Import a bank statement and put your income and salary day on Plan, and I can tell you how far your money goes.</p>
       </div>`;
   }
 
-  const projected = s.runRate * s.daysLeft;
-  const leftAtEnd = s.leftToSpend - projected;
+  const s = { runRate: c.pace };
+  const projected = c.pace * c.daysToClose;
+  const leftAtEnd = c.free - projected;
   const over = leftAtEnd < 0;
-  const pct = s.leftToSpend > 0 ? Math.min(100, Math.round((projected / s.leftToSpend) * 100)) : 100;
+  const pct = c.free > 0 ? Math.min(100, Math.round((projected / c.free) * 100)) : 100;
   return `
-    <div class="hero">
-      <p class="hero-label">Left to spend in ${m.monthName}</p>
-      <p class="hero-amount ${s.leftToSpend < 0 ? 'negative' : ''}">${formatSignedCurrency(s.leftToSpend)}</p>
+    <div class="hero level-${c.level}">
+      <p class="hero-label">Left to spend until ${formatDateNice(c.cycleClose || c.windowEnd)}</p>
+      <p class="hero-amount ${c.free < 0 ? 'negative' : ''}">${formatSignedCurrency(c.free)}</p>
       <div class="hero-meter"><div class="hero-meter-fill ${over ? 'over' : ''}" style="width:${pct}%"></div></div>
       <p class="hero-sub">${
         s.runRate === 0
-          ? `No spending yet this month to set a pace from.`
+          ? `No card spending yet this cycle to set a pace from.`
           : over
             ? `At your pace of ${formatCurrency(s.runRate)} a day you'd spend ${formatCurrency(projected)} by then — ${formatCurrency(-leftAtEnd)} more than you have.`
             : `At your pace of ${formatCurrency(s.runRate)} a day you'd finish with ${formatCurrency(leftAtEnd)} to spare.`
       }</p>
       <div class="hero-split">
         <div class="hero-stat"><span class="stat-label">Your pace</span><span class="stat-value out">${formatCurrency(s.runRate)}/day</span></div>
-        <div class="hero-stat"><span class="stat-label">Safe per day</span><span class="stat-value">${m.perDay > 0 ? formatCurrency(m.perDay) : '₹0'}</span></div>
+        <div class="hero-stat"><span class="stat-label">Safe per day</span><span class="stat-value">${c.perDay > 0 ? formatCurrency(c.perDay) : '₹0'}</span></div>
       </div>
     </div>
   `;
@@ -181,7 +184,7 @@ function affordAnswer(s, a) {
 
   const verdict = !a.canAfford ? 'Not right now' : a.tight ? 'It fits, but only just' : 'Yes, comfortably';
   const tone = !a.canAfford ? 'bad' : a.tight ? 'warn' : 'good';
-  const until = ` in ${s.month.monthName}`;
+  const until = ` until ${formatDateNice(s.cycle.cycleClose || s.cycle.windowEnd)}`;
 
   return `
     <div class="coach-answer">
