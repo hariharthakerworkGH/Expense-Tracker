@@ -18,7 +18,12 @@ function computeCycleBoundary(billingCycleDay, today = new Date()) {
 // statement's period end, or the computed boundary from billingCycleDay.
 // Transactions dated AFTER this value belong to the currently-open cycle.
 export function currentCycleStart(account, importBatches) {
-  const batches = importBatches.filter((b) => b.accountId === account.id).sort((a, b) => (a.periodEnd < b.periodEnd ? 1 : -1));
+  // Only real statements close a cycle. A "current transactions" list is a
+  // snapshot of the cycle that's still open; counting its end date here would
+  // move the cycle start to the day you pasted it and hide everything before.
+  const batches = importBatches
+    .filter((b) => b.accountId === account.id && !b.provisional)
+    .sort((a, b) => (a.periodEnd < b.periodEnd ? 1 : -1));
   const lastImportBoundary = batches[0]?.periodEnd || null;
   const computedBoundary = computeCycleBoundary(account.billingCycleDay);
 

@@ -1,7 +1,7 @@
 import { getAll, getSetting, setSetting } from './db.js';
 import { cardBillDue } from './account-metrics.js';
 import { formatCurrency } from './format.js';
-import { frequencyOf, hasDueDate } from './frequency.js';
+import { frequencyOf, hasDueDate, nextOccurrence } from './frequency.js';
 
 // Bill reminders without a server.
 //
@@ -158,16 +158,6 @@ function shiftDays(iso, delta) {
   const d = new Date(iso);
   d.setDate(d.getDate() + delta);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function nextOccurrence(dayOfMonth, from) {
-  const day = Math.min(Math.max(dayOfMonth || 1, 1), 31);
-  const candidate = new Date(from.getFullYear(), from.getMonth(), day);
-  if (candidate < from) candidate.setMonth(candidate.getMonth() + 1);
-  // Clamp to the month's real length so "the 31st" still lands in February.
-  const lastDay = new Date(candidate.getFullYear(), candidate.getMonth() + 1, 0).getDate();
-  candidate.setDate(Math.min(day, lastDay));
-  return `${candidate.getFullYear()}-${String(candidate.getMonth() + 1).padStart(2, '0')}-${String(candidate.getDate()).padStart(2, '0')}`;
 }
 
 function niceDate(iso) {

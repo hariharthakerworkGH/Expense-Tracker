@@ -22,6 +22,7 @@ export async function render(container) {
     getSetting('monthlyIncome', null),
     getBudgets(),
   ]);
+  const salaryDay = await getSetting('salaryDay', null);
 
   const fixed = recurring.filter((r) => isFixed(r) && r.active !== false);
   // Each commitment is stored the way you entered it ("₹120 a day"); what the
@@ -93,6 +94,11 @@ export async function render(container) {
         <span>Monthly income</span>
         <input type="number" id="plan-income" inputmode="decimal" step="1" placeholder="${suggestedIncome != null ? (suggestedIncome / 100).toFixed(0) : 'e.g. 80000'}" value="${incomeValue != null ? (incomeValue / 100).toFixed(0) : ''}">
       </label>
+      <label class="field">
+        <span>Salary day <span class="muted">(the date it lands in your bank)</span></span>
+        <input type="number" id="plan-salary-day" inputmode="numeric" min="1" max="31" step="1" placeholder="e.g. 1" value="${salaryDay || ''}">
+      </label>
+      <p class="muted-note">Your salary and its date let the Summary work out how much you can spend before your card bills are paid. Pick 31 for the last day of every month.</p>
       ${
         income == null && suggestedIncome != null
           ? `<p class="muted-note">Suggested from what landed in your Income category recently. Change it if that's not typical.</p>`
@@ -143,6 +149,13 @@ export async function render(container) {
   incomeEl.addEventListener('change', async () => {
     const raw = parseFloat(incomeEl.value);
     await setSetting('monthlyIncome', Number.isFinite(raw) ? Math.round(raw * 100) : null);
+    render(container);
+  });
+
+  const salaryDayEl = container.querySelector('#plan-salary-day');
+  salaryDayEl.addEventListener('change', async () => {
+    const day = parseInt(salaryDayEl.value, 10);
+    await setSetting('salaryDay', Number.isInteger(day) && day >= 1 && day <= 31 ? day : null);
     render(container);
   });
 

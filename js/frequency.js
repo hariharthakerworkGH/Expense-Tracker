@@ -54,8 +54,26 @@ export function hasDueDate(frequency) {
   return (FREQUENCIES[frequency] || FREQUENCIES[DEFAULT_FREQUENCY]).perMonth <= 1;
 }
 
-export function frequencyLabel(frequency) {
-  return (FREQUENCIES[frequency] || FREQUENCIES[DEFAULT_FREQUENCY]).label;
+// The next date on or after `from` that falls on `dayOfMonth`, as YYYY-MM-DD.
+// A day the month doesn't have is clamped to that month's last day, so "the
+// 31st" means 30 September, not 1 October. Built month by month rather than by
+// letting Date roll over: new Date(2026, 8, 31) silently becomes 1 October,
+// which is how a bill "due on the 31st" used to jump to 31 October.
+export function nextOccurrence(dayOfMonth, from = new Date()) {
+  const day = Math.min(Math.max(Number(dayOfMonth) || 1, 1), 31);
+  const start = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  for (let offset = 0; offset <= 12; offset++) {
+    const year = start.getFullYear();
+    const month = start.getMonth() + offset;
+    const lastDay = new Date(year, month + 1, 0).getDate();
+    const candidate = new Date(year, month, Math.min(day, lastDay));
+    if (candidate >= start) return isoLocal(candidate);
+  }
+  return null;
+}
+
+export function isoLocal(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 export function frequencyShort(frequency) {

@@ -4,7 +4,7 @@
 // Keep the number identical to APP_VERSION in js/version.js. The app compares
 // the two at runtime to tell the user when they are looking at a stale copy,
 // so they must move together.
-const CACHE_NAME = 'expense-tracker-v22';
+const CACHE_NAME = 'expense-tracker-v23';
 
 const APP_SHELL = [
   './',
@@ -36,6 +36,9 @@ const APP_SHELL = [
   './js/version.js',
   './js/alerts.js',
   './js/alert-inbox.js',
+  './js/free-to-spend.js',
+  './js/parsers/hdfc-card-current-text.js',
+  './js/parsers/icici-credit-card-current.js',
   './js/views/inbox.js',
   './js/views/coach.js',
   './js/views/add.js',

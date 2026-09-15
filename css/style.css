@@ -1576,6 +1576,29 @@ h3 {
   margin-left: 2px;
 }
 
+/* ---------- Free to spend breakdown ---------- */
+
+.fts-breakdown {
+  margin-top: 14px;
+}
+
+.fts-breakdown summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--accent);
+  padding: 4px 0;
+}
+
+.fts-breakdown .totals-card {
+  background: var(--bg);
+  margin: 10px 0 6px;
+}
+
+.fts-breakdown .muted-note {
+  margin: 6px 2px 0;
+}
+
 /* ---------- Bank alert inbox ---------- */
 
 .inbox-head {

@@ -1,6 +1,7 @@
 import { getAll, put, getSetting, setSetting } from '../db.js';
 import { formatCurrency, formatSignedCurrency, formatDateNice } from '../format.js';
-import { bankBalance, cardCycleSpend, cardBillDue } from '../account-metrics.js';
+import { cardBillDue } from '../account-metrics.js';
+import { computeFreeToSpend } from '../free-to-spend.js';
 import { detectRecurring, nextDueDate } from '../recurring.js';
 import { detectAnomalies } from '../anomalies.js';
 import { categoryStyle } from '../category-style.js';
@@ -49,63 +50,70 @@ export async function render(container) {
 
 async function renderDashboard(container) {
   const dashboardEl = container.querySelector('#dashboard');
-  const [accounts, transactions, importBatches] = await Promise.all([getAll('accounts'), getAll('transactions'), getAll('importBatches')]);
+  const [accounts, transactions, fts] = await Promise.all([getAll('accounts'), getAll('transactions'), computeFreeToSpend()]);
 
-  dashboardEl.innerHTML = [
-    renderNetPosition(accounts, transactions, importBatches),
-    '<div id="attention-section"></div>',
-    '<div id="upcoming-section"></div>',
-  ].join('');
+  dashboardEl.innerHTML = [renderFreeToSpend(accounts, fts), '<div id="attention-section"></div>', '<div id="upcoming-section"></div>'].join('');
 
   await renderAttention(container, transactions);
   await renderUpcoming(container);
 }
 
-function renderNetPosition(accounts, transactions, importBatches) {
-  const bankAccounts = accounts.filter((a) => a.type === 'bank');
-  const cardAccounts = accounts.filter((a) => a.type === 'card');
-
-  const bankBalances = bankAccounts.map((a) => bankBalance(a, transactions)).filter((b) => b != null);
-  const knownBank = bankBalances.length > 0;
-  const totalBank = bankBalances.reduce((s, b) => s + b, 0);
-
-  const bills = cardAccounts.map((a) => cardBillDue(a)).filter((b) => b && !b.paid);
-  const billsDue = bills.reduce((s, b) => s + b.amount, 0);
-  const unbilled = cardAccounts.reduce((s, a) => s + cardCycleSpend(a, transactions, importBatches).spend, 0);
-
-  const soonest = bills.filter((b) => b.daysLeft != null).sort((a, b) => a.daysLeft - b.daysLeft)[0];
-
-  if (!knownBank && cardAccounts.length === 0) {
-    return `<div class="totals-card"><p class="muted-note">Add a bank account or card and import a statement to see your net position here.</p></div>`;
+// The headline: how much can still be spent before the bank runs out, with
+// the sum that produces it one tap away. Showing the working matters as much
+// as the answer - "₹X free" is only trustworthy if you can see it's bank plus
+// salary minus what the cards owe.
+function renderFreeToSpend(accounts, fts) {
+  if (fts.bank == null) {
+    return `<div class="totals-card"><p class="muted-note">${
+      accounts.some((a) => a.type === 'bank')
+        ? 'Import a bank statement so the app knows your balance — then this shows how much you can still spend.'
+        : 'Add your bank account and import a statement to see how much you can still spend.'
+    }</p></div>`;
   }
 
-  const dueNote = soonest
-    ? soonest.daysLeft < 0
-      ? `<span class="bill-overdue">overdue</span>`
-      : soonest.daysLeft === 0
-        ? `<span class="bill-urgent">due today</span>`
-        : `<span class="${soonest.daysLeft <= 3 ? 'bill-urgent' : 'muted'}">in ${soonest.daysLeft}d</span>`
-    : '';
+  const until = formatDateNice(fts.windowEnd);
+  const owedCards = fts.cards.filter((c) => c.owed !== 0);
+  const unpaidCards = fts.cards.filter((c) => c.unpaid > 0);
+  const line = (label, amount, sign, note = '') =>
+    `<div class="totals-row"><span>${label}${note ? `<br><span class="muted-note">${note}</span>` : ''}</span><span class="${sign === '+' ? 'in' : 'out'}">${sign}${formatCurrency(Math.abs(amount))}</span></div>`;
 
-  // The number that actually answers "can I afford this?" is what's left once
-  // the cards are settled, so that gets the hero treatment - not the raw
-  // balance, which flatters you by the size of your unpaid bills.
-  const net = totalBank - billsDue;
   return `
     <div class="hero">
-      <p class="hero-label">${knownBank ? 'Left after paying bills' : 'Card bills due'}</p>
-      <p class="hero-amount ${knownBank ? (net < 0 ? 'negative' : '') : 'negative'}">${knownBank ? formatSignedCurrency(net) : formatCurrency(billsDue)}</p>
-      ${unbilled > 0 ? `<p class="hero-sub">Plus ${formatCurrency(unbilled)} spent on cards since your last statements, not billed yet.</p>` : ''}
+      <p class="hero-label">Free to spend until ${until}</p>
+      <p class="hero-amount ${fts.free < 0 ? 'negative' : ''}">${formatSignedCurrency(fts.free)}</p>
+      <p class="hero-sub">${
+        fts.free > 0
+          ? `About ${formatCurrency(fts.perDay)} a day for the next ${fts.daysLeft} days — after every card is paid.`
+          : `That's ${formatCurrency(-fts.free)} more than you have, once every card is paid. Spending anything more makes it worse.`
+      }</p>
       <div class="hero-split">
         <div class="hero-stat">
           <span class="stat-label">In your bank</span>
-          <span class="stat-value">${knownBank ? formatCurrency(totalBank) : '—'}</span>
+          <span class="stat-value">${formatCurrency(fts.bank)}</span>
         </div>
         <div class="hero-stat">
-          <span class="stat-label">Bills due ${dueNote}</span>
-          <span class="stat-value out">${formatCurrency(billsDue)}</span>
+          <span class="stat-label">Owed on cards</span>
+          <span class="stat-value out">${formatCurrency(fts.totals.owedCards + fts.totals.unpaidBills)}</span>
         </div>
       </div>
+      <details class="fts-breakdown">
+        <summary>How this is worked out</summary>
+        <div class="totals-card">
+          ${line('In your bank', fts.bank, '+', fts.bankLines.map((l) => `as of ${formatDateNice(l.asOf)}${l.entriesSince ? ` + ${l.entriesSince} entr${l.entriesSince === 1 ? 'y' : 'ies'} since` : ''}`).join(' · '))}
+          ${
+            fts.salary.counted
+              ? line('Salary', fts.salary.amount, '+', `on ${formatDateNice(fts.salary.date)}`)
+              : fts.salary.alreadyIn
+                ? '<div class="totals-row"><span>Salary<br><span class="muted-note">already in your bank today</span></span><span class="muted">—</span></div>'
+                : ''
+          }
+          ${unpaidCards.map((c) => line(`${escapeHtml(c.account.label)} bill`, c.unpaid, '-', 'billed, not paid yet')).join('')}
+          ${owedCards.map((c) => line(escapeHtml(c.account.label), c.owed, c.owed < 0 ? '+' : '-', c.listImportedAt ? `this cycle · list from ${formatDateNice(c.listImportedAt)}` : 'this cycle · from saved entries only')).join('')}
+          ${fts.commitments.map((c) => line(escapeHtml(c.label), c.amount, '-', c.detail)).join('')}
+          <div class="totals-row net"><span>Free to spend</span><span>${formatSignedCurrency(fts.free)}</span></div>
+        </div>
+        ${fts.notes.map((n) => `<p class="muted-note">${escapeHtml(n)}</p>`).join('')}
+      </details>
     </div>
   `;
 }

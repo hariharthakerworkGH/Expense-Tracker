@@ -1,5 +1,6 @@
 import { getAll, put } from './db.js';
 import { significantTokens } from './merchant-rules.js';
+import { nextOccurrence } from './frequency.js';
 
 const MIN_OCCURRENCES = 2;
 const MIN_INTERVAL_DAYS = 25;
@@ -60,12 +61,11 @@ export async function detectRecurring() {
   return detected;
 }
 
+// Delegates to the shared helper: the version that lived here let a day the
+// month doesn't have roll into the next month, and treated something due
+// today as already past because it compared against the current time.
 export function nextDueDate(dayOfMonth, today = new Date()) {
-  const y = today.getFullYear();
-  const m = today.getMonth();
-  let due = new Date(y, m, dayOfMonth);
-  if (due < today) due = new Date(y, m + 1, dayOfMonth);
-  return `${due.getFullYear()}-${String(due.getMonth() + 1).padStart(2, '0')}-${String(due.getDate()).padStart(2, '0')}`;
+  return nextOccurrence(dayOfMonth, today);
 }
 
 function merchantKeyFor(desc) {

@@ -47,6 +47,10 @@ function claim(row, match) {
     isTransfer: match.isTransfer === true,
     transferManual: match.transferManual === true,
     notes: match.notes || null,
+    // Kept so the same bank alert shared again later is still recognised as
+    // already saved, after this row has replaced the alert's own entry.
+    alertKey: match.alertKey || null,
+    alertRef: match.alertRef || null,
   };
 }
 
